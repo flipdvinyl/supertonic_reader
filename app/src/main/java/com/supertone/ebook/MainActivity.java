@@ -67,6 +67,8 @@ public class MainActivity extends AppCompatActivity {
     private List<File> audioChunks = new ArrayList<>();
     private List<String> chunkTexts = new ArrayList<>(); // 청크 텍스트 저장
     private int currentChunkIndex = 0;
+    private List<String> allChunks = new ArrayList<>(); // 전체 텍스트의 모든 청크 (절대 번호 기준)
+    private int firstChunkAbsoluteIndex = 0; // 현재 생성 중인 첫 번째 청크의 절대 인덱스
     private boolean isGenerating = false;
     private boolean isPaused = false;
     private java.util.concurrent.Future<?> currentGenerationTask = null;
@@ -438,14 +440,23 @@ public class MainActivity extends AppCompatActivity {
             sentenceToChunkMap.add(-1); // 초기값: 매핑 없음
         }
         
+        // 전체 텍스트의 청크 리스트 사용 (절대 번호 기준)
+        // allChunks는 setupPages()에서 이미 생성되어 있음
+        if (allChunks.isEmpty()) {
+            allChunks = chunkText(fullText);
+        }
+        
+        // 현재 생성할 청크의 절대 시작 인덱스 (전체 텍스트 기준 0번부터 시작)
+        firstChunkAbsoluteIndex = 0;
+        
         currentGenerationTask = executorService.submit(() -> {
             try {
-                // 텍스트를 청크로 분할
-                List<String> chunks = chunkText(text);
+                // 전체 텍스트의 청크 리스트 사용 (절대 번호 기준)
+                List<String> chunks = allChunks;
                 mainHandler.post(() -> updateStatus("Generating " + chunks.size() + " segments..."));
                 
-                // 청크를 문장에 매핑
-                mapChunksToSentences(chunks);
+                // 청크를 문장에 매핑 (절대 번호 사용)
+                mapChunksToSentencesWithAbsoluteIndex(chunks, 0, 0);
                 
                 if (chunks.isEmpty()) {
                     throw new Exception("Chunk generation failed");
@@ -491,7 +502,9 @@ public class MainActivity extends AppCompatActivity {
                 chunkProcessingTimes.add(firstChunkProcessingTime);
                 totalChunkProcessingTime += firstChunkProcessingTime;
                 
-                File firstChunkFile = saveChunk(firstAudioData, 0);
+                // 절대 청크 번호 사용
+                int absoluteChunkIndex = firstChunkAbsoluteIndex;
+                File firstChunkFile = saveChunk(firstAudioData, absoluteChunkIndex);
                 audioChunks.add(firstChunkFile);
                 chunkTexts.add(firstChunk); // 청크 텍스트 저장
                 
@@ -539,7 +552,9 @@ public class MainActivity extends AppCompatActivity {
                         chunkProcessingTimes.add(chunkProcessingTime);
                         totalChunkProcessingTime += chunkProcessingTime;
                         
-                        File chunkFile = saveChunk(chunkAudioData, i);
+                        // 절대 청크 번호 사용
+                        int chunkAbsoluteIndex = firstChunkAbsoluteIndex + i;
+                        File chunkFile = saveChunk(chunkAudioData, chunkAbsoluteIndex);
                         audioChunks.add(chunkFile);
                         chunkTexts.add(chunk); // 청크 텍스트 저장
                         
@@ -765,6 +780,16 @@ public class MainActivity extends AppCompatActivity {
      * 청크를 문장에 매핑 (특정 문장 인덱스부터 시작)
      */
     private void mapChunksToSentencesFromIndex(List<String> chunks, int startSentenceIndex) {
+        mapChunksToSentencesWithAbsoluteIndex(chunks, startSentenceIndex, 0);
+    }
+    
+    /**
+     * 청크를 문장에 매핑 (절대 청크 번호 사용)
+     * @param chunks 청크 리스트
+     * @param startSentenceIndex 시작 문장 인덱스
+     * @param startChunkAbsoluteIndex 시작 청크의 절대 인덱스
+     */
+    private void mapChunksToSentencesWithAbsoluteIndex(List<String> chunks, int startSentenceIndex, int startChunkAbsoluteIndex) {
         // sentenceToChunkMap이 충분히 크지 않으면 확장
         while (sentenceToChunkMap.size() < sentences.size()) {
             sentenceToChunkMap.add(-1);
@@ -772,9 +797,12 @@ public class MainActivity extends AppCompatActivity {
         
         // 각 청크를 순서대로 처리
         int sentenceIndex = startSentenceIndex;
-        for (int chunkIndex = 0; chunkIndex < chunks.size() && sentenceIndex < sentences.size(); chunkIndex++) {
-            String chunk = chunks.get(chunkIndex).trim();
+        for (int relativeChunkIndex = 0; relativeChunkIndex < chunks.size() && sentenceIndex < sentences.size(); relativeChunkIndex++) {
+            String chunk = chunks.get(relativeChunkIndex).trim();
             String remainingChunk = chunk;
+            
+            // 절대 청크 번호 계산
+            int absoluteChunkIndex = startChunkAbsoluteIndex + relativeChunkIndex;
             
             // 이 청크에 포함된 연속된 문장들을 찾아 매핑
             while (sentenceIndex < sentences.size() && remainingChunk.length() > 0) {
@@ -783,8 +811,8 @@ public class MainActivity extends AppCompatActivity {
                 // 청크의 현재 위치에서 이 문장을 찾기
                 int pos = remainingChunk.indexOf(sentence);
                 if (pos >= 0) {
-                    // 이 문장을 이 청크에 매핑
-                    sentenceToChunkMap.set(sentenceIndex, chunkIndex);
+                    // 이 문장을 절대 청크 번호에 매핑
+                    sentenceToChunkMap.set(sentenceIndex, absoluteChunkIndex);
                     sentenceIndex++;
                     
                     // 청크의 나머지 부분 업데이트 (이 문장 이후 부분)
@@ -1324,6 +1352,9 @@ public class MainActivity extends AppCompatActivity {
         // 약어를 고려하여 텍스트를 문장으로 분할
         sentences = splitIntoSentences(fullText);
         
+        // 전체 텍스트를 청크로 나누어 절대 청크 번호 결정
+        allChunks = chunkText(fullText);
+        
         // 페이지 크기 계산 - 현재 렌더링 창 크기를 기반으로 높이 고정
         textDisplayContainer.post(() -> {
             if (textDisplay == null) return;
@@ -1748,14 +1779,54 @@ public class MainActivity extends AppCompatActivity {
         // 람다 표현식에서 사용하기 위해 final 변수로 복사
         final int startSentenceIndex = sentenceIndex;
         
+        // 전체 텍스트의 청크 리스트 사용 (절대 번호 기준)
+        // allChunks는 setupPages()에서 이미 생성되어 있음
+        if (allChunks.isEmpty()) {
+            allChunks = chunkText(fullText);
+        }
+        
+        // 현재 문장이 속한 절대 청크 번호 찾기
+        int targetAbsoluteChunkIndex = -1;
+        if (sentenceIndex < sentenceToChunkMap.size() && sentenceToChunkMap.get(sentenceIndex) >= 0) {
+            targetAbsoluteChunkIndex = sentenceToChunkMap.get(sentenceIndex);
+        } else {
+            // 매핑이 없으면 전체 청크 리스트에서 찾기
+            String targetSentenceText = sentences.get(sentenceIndex);
+            for (int i = 0; i < allChunks.size(); i++) {
+                if (allChunks.get(i).contains(targetSentenceText)) {
+                    targetAbsoluteChunkIndex = i;
+                    break;
+                }
+            }
+        }
+        
+        // 절대 청크 번호를 찾지 못하면 처음부터 생성
+        if (targetAbsoluteChunkIndex < 0) {
+            targetAbsoluteChunkIndex = 0;
+        }
+        
+        // 현재 생성할 청크의 절대 시작 인덱스
+        firstChunkAbsoluteIndex = targetAbsoluteChunkIndex;
+        
+        // 해당 절대 청크 번호부터의 청크 리스트 생성
+        List<String> chunksFromIndex = new ArrayList<>();
+        if (targetAbsoluteChunkIndex < allChunks.size()) {
+            for (int i = targetAbsoluteChunkIndex; i < allChunks.size(); i++) {
+                chunksFromIndex.add(allChunks.get(i));
+            }
+        }
+        
         // 즉시 상태 업데이트 (백그라운드 스레드 시작 전)
         updateStatus("Generating first segment...");
         // 첫 번째 청크 생성 중일 때 gen 아이콘 표시
         playButton.setImageResource(R.drawable.ic_gen);
         
+        final List<String> finalChunks = chunksFromIndex;
+        final int finalStartAbsoluteIndex = targetAbsoluteChunkIndex;
+        
         currentGenerationTask = executorService.submit(() -> {
             try {
-                List<String> chunks = chunkText(textFromSentence.toString());
+                List<String> chunks = finalChunks;
                 mainHandler.post(() -> updateStatus("Generating " + chunks.size() + " segments..."));
                 
                 if (chunks.isEmpty()) {
@@ -1790,12 +1861,14 @@ public class MainActivity extends AppCompatActivity {
                 chunkProcessingTimes.add(firstChunkProcessingTime2);
                 totalChunkProcessingTime += firstChunkProcessingTime2;
                 
-                File firstChunkFile = saveChunk(firstAudioData, 0);
+                // 절대 청크 번호 사용
+                int absoluteChunkIndex = finalStartAbsoluteIndex;
+                File firstChunkFile = saveChunk(firstAudioData, absoluteChunkIndex);
                 audioChunks.add(firstChunkFile);
                 chunkTexts.add(firstChunk); // 청크 텍스트 저장
                 
-                // 문장-청크 매핑 업데이트 (startSentenceIndex부터 시작하는 문장들만 고려)
-                mapChunksToSentencesFromIndex(chunks, startSentenceIndex);
+                // 문장-청크 매핑 업데이트 (절대 번호 사용)
+                mapChunksToSentencesWithAbsoluteIndex(chunks, startSentenceIndex, finalStartAbsoluteIndex);
                 
                 // 첫 번째 청크 즉시 재생 (오디오 길이 계산은 playFirstChunk 내부에서 수행)
                 mainHandler.post(() -> {
@@ -1828,8 +1901,11 @@ public class MainActivity extends AppCompatActivity {
                         chunkProcessingTimes.add(chunkProcessingTime);
                         totalChunkProcessingTime += chunkProcessingTime;
                         
-                        File chunkFile = saveChunk(chunkAudioData, i);
+                        // 절대 청크 번호 사용
+                        int chunkAbsoluteIndex = finalStartAbsoluteIndex + i;
+                        File chunkFile = saveChunk(chunkAudioData, chunkAbsoluteIndex);
                         audioChunks.add(chunkFile);
+                        chunkTexts.add(chunk); // 청크 텍스트 저장
                         
                         // Estimate audio duration from chunk size
                         long chunkSize = chunkFile.length();
@@ -1877,16 +1953,18 @@ public class MainActivity extends AppCompatActivity {
      * Voice 변경 처리 (현재 재생 중인 청크부터 시작)
      */
     private void handleVoiceChange() {
-        // 현재 재생 중인 청크 번호 저장 (목소리 변경 전에)
-        // cancelCurrentGeneration() 호출 전에 모든 필요한 정보를 먼저 저장
-        int currentChunk = currentChunkIndex;
+        // 현재 재생 중인 청크의 절대 번호 찾기
+        // currentChunkIndex는 audioChunks 리스트 내의 상대 인덱스이므로,
+        // 절대 청크 번호를 찾기 위해 파일명에서 추출하거나 firstChunkAbsoluteIndex를 사용
+        int currentAbsoluteChunkIndex = -1;
         String currentChunkText = null;
         int targetSentenceIndex = -1;
         
-        android.util.Log.d("MainActivity", "Voice change: saving current chunk index: " + currentChunk + 
+        android.util.Log.d("MainActivity", "Voice change: currentChunkIndex: " + currentChunkIndex + 
             ", audioChunks.size(): " + audioChunks.size() + 
             ", chunkTexts.size(): " + chunkTexts.size() + 
-            ", sentenceToChunkMap.size(): " + sentenceToChunkMap.size());
+            ", sentenceToChunkMap.size(): " + sentenceToChunkMap.size() +
+            ", firstChunkAbsoluteIndex: " + firstChunkAbsoluteIndex);
         
         // audioChunks가 비어있지 않고, currentChunkIndex가 유효한 범위 내에 있는지 확인
         if (audioChunks.isEmpty()) {
@@ -1899,8 +1977,8 @@ public class MainActivity extends AppCompatActivity {
         }
         
         // currentChunkIndex가 audioChunks 범위 내에 있는지 확인
-        if (currentChunk < 0 || currentChunk >= audioChunks.size()) {
-            android.util.Log.w("MainActivity", "Voice change: currentChunkIndex out of range: " + currentChunk + 
+        if (currentChunkIndex < 0 || currentChunkIndex >= audioChunks.size()) {
+            android.util.Log.w("MainActivity", "Voice change: currentChunkIndex out of range: " + currentChunkIndex + 
                 " (audioChunks.size(): " + audioChunks.size() + "), generating from beginning");
             if (!fullText.isEmpty()) {
                 cancelCurrentGeneration();
@@ -1909,10 +1987,13 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         
+        // 절대 청크 번호 계산: firstChunkAbsoluteIndex + currentChunkIndex
+        currentAbsoluteChunkIndex = firstChunkAbsoluteIndex + currentChunkIndex;
+        
         // chunkTexts가 비어있지 않고, currentChunkIndex가 범위 내에 있는지 확인
-        if (chunkTexts.isEmpty() || currentChunk >= chunkTexts.size()) {
+        if (chunkTexts.isEmpty() || currentChunkIndex >= chunkTexts.size()) {
             android.util.Log.w("MainActivity", "Voice change: chunkTexts is empty or currentChunkIndex out of range: " + 
-                currentChunk + " (chunkTexts.size(): " + chunkTexts.size() + "), generating from beginning");
+                currentChunkIndex + " (chunkTexts.size(): " + chunkTexts.size() + "), generating from beginning");
             if (!fullText.isEmpty()) {
                 cancelCurrentGeneration();
                 generateAudio();
@@ -1921,7 +2002,7 @@ public class MainActivity extends AppCompatActivity {
         }
         
         // 현재 청크의 텍스트 가져오기 (cancelCurrentGeneration 호출 전에!)
-        currentChunkText = chunkTexts.get(currentChunk);
+        currentChunkText = chunkTexts.get(currentChunkIndex);
         if (currentChunkText == null || currentChunkText.trim().isEmpty()) {
             android.util.Log.w("MainActivity", "Voice change: currentChunkText is null or empty, generating from beginning");
             if (!fullText.isEmpty()) {
@@ -1931,9 +2012,9 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         
-        // 현재 청크에 해당하는 문장 찾기 (첫 번째 매칭) - cancelCurrentGeneration 호출 전에!
+        // 현재 절대 청크 번호에 해당하는 문장 찾기 - cancelCurrentGeneration 호출 전에!
         for (int i = 0; i < sentenceToChunkMap.size(); i++) {
-            if (sentenceToChunkMap.get(i) == currentChunk) {
+            if (sentenceToChunkMap.get(i) == currentAbsoluteChunkIndex) {
                 targetSentenceIndex = i;
                 break;
             }
@@ -1941,7 +2022,7 @@ public class MainActivity extends AppCompatActivity {
         
         // 매핑을 찾을 수 없으면, 청크 텍스트를 직접 사용하여 문장 찾기 (fallback) - cancelCurrentGeneration 호출 전에!
         if (targetSentenceIndex < 0) {
-            android.util.Log.w("MainActivity", "Voice change: sentence mapping not found for chunk " + currentChunk + 
+            android.util.Log.w("MainActivity", "Voice change: sentence mapping not found for absolute chunk " + currentAbsoluteChunkIndex + 
                 ", trying to find sentence by chunk text");
             for (int i = 0; i < sentences.size(); i++) {
                 String sentence = sentences.get(i).trim();
@@ -1960,7 +2041,7 @@ public class MainActivity extends AppCompatActivity {
         if (targetSentenceIndex >= 0 && targetSentenceIndex < sentences.size()) {
             String targetSentence = sentences.get(targetSentenceIndex);
             android.util.Log.d("MainActivity", "Voice change: found target sentence at index " + targetSentenceIndex + 
-                " for chunk " + currentChunk + ", generating from this sentence");
+                " for absolute chunk " + currentAbsoluteChunkIndex + ", generating from this sentence");
             generateFromSentence(targetSentence);
             return;
         }
