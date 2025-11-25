@@ -1,0 +1,8 @@
+// Top-level build file
+// Note: Repositories are managed in settings.gradle
+// This file is kept for compatibility but repositories are defined in settings.gradle
+
+task clean(type: Delete) {
+    delete rootProject.buildDir
+}
+

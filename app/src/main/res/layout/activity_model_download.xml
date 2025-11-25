@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="24dp"
+    android:gravity="center">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Supertonic TTS Model Installation"
+        android:textSize="20sp"
+        android:textStyle="bold"
+        android:layout_marginBottom="32dp"
+        android:gravity="center" />
+
+    <TextView
+        android:id="@+id/wifiStatusText"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Wi-Fi: Checking..."
+        android:textSize="16sp"
+        android:padding="16dp"
+        android:background="#F5F5F5"
+        android:layout_marginBottom="24dp"
+        android:gravity="center" />
+
+    <TextView
+        android:id="@+id/statusText"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Status: Ready to install"
+        android:textSize="14sp"
+        android:padding="16dp"
+        android:background="#F5F5F5"
+        android:layout_marginBottom="24dp"
+        android:minHeight="80dp"
+        android:gravity="center" />
+
+    <ProgressBar
+        android:id="@+id/progressBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="24dp"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:max="100"
+        android:progress="0"
+        android:visibility="gone" />
+
+    <Button
+        android:id="@+id/installButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Install Supertonic TTS Model"
+        android:textSize="16sp"
+        android:padding="16dp"
+        android:layout_marginBottom="16dp" />
+
+    <Button
+        android:id="@+id/retryButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Retry"
+        android:textSize="16sp"
+        android:padding="16dp"
+        android:visibility="gone" />
+
+</LinearLayout>
+
+

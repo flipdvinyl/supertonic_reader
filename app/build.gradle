@@ -1,0 +1,48 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.supertone.ebook'
+    compileSdk 34  // 컴파일 SDK는 최신 유지 (호환성)
+
+    defaultConfig {
+        applicationId "com.supertone.ebook"
+        minSdk 24
+        targetSdk 30  // Android 11 (API 30) 타깃
+        versionCode 1
+        versionName "1.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+    
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    
+    packagingOptions {
+        pickFirst '**/libc++_shared.so'
+        pickFirst '**/libonnxruntime.so'
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.10.0'
+    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+    
+    // ONNX Runtime for CPU
+    implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.19.2'
+    
+    // Jackson for JSON parsing (Supertonic) - Android 11 호환 버전
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.13.5'
+    implementation 'com.fasterxml.jackson.core:jackson-core:2.13.5'
+    implementation 'com.fasterxml.jackson.core:jackson-annotations:2.13.5'
+}
+

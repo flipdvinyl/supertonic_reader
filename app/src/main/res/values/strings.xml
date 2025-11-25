@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Supertonic Reader</string>
+    <string name="generate_button">Generate</string>
+    <string name="status_waiting">Status: Waiting</string>
+    <string name="status_generating">Status: Generating...</string>
+    <string name="status_playing">Status: Playing</string>
+    <string name="status_complete">Status: Complete</string>
+    <string name="status_error">Status: Error</string>
+</resources>
+

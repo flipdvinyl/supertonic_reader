@@ -1,0 +1,227 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="#FFFFFF"
+    android:padding="16dp">
+
+    <!-- 텍스트 디스플레이 영역 (전자책 스타일) -->
+    <FrameLayout
+        android:id="@+id/textDisplayContainer"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="10"
+        android:background="#FFFFFF"
+        android:clickable="true"
+        android:focusable="true"
+        android:elevation="0dp">
+        
+        <TextView
+            android:id="@+id/textDisplay"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:gravity="top|start"
+            android:textSize="20sp"
+            android:lineSpacingMultiplier="1.2"
+            android:padding="16dp"
+            android:text=""
+            android:textColor="#000000"
+            android:background="#FFFFFF"
+            android:scrollbars="none"
+            android:ellipsize="none"
+            android:focusable="false"
+            android:focusableInTouchMode="false"
+            android:clickable="true"
+            android:longClickable="false"
+            android:elevation="1dp" />
+    </FrameLayout>
+    
+    <!-- 페이지 인디케이터 -->
+    <LinearLayout
+        android:id="@+id/pageIndicatorContainer"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:background="#FFFFFF"
+        android:layout_marginTop="0dp"
+        android:layout_marginBottom="0dp">
+        
+        <FrameLayout
+            android:id="@+id/pageIndicatorFrame"
+            android:layout_width="match_parent"
+            android:layout_height="5dp"
+            android:background="#E0E0E0"
+            android:paddingStart="0dp"
+            android:paddingEnd="0dp"
+            android:paddingTop="8dp"
+            android:paddingBottom="8dp">
+            
+            <!-- 흰색 박스 (핸들러 좌우 3px) -->
+            <View
+                android:id="@+id/pageIndicatorHandleBox"
+                android:layout_width="36dp"
+                android:layout_height="5dp"
+                android:background="#FFFFFF"
+                android:layout_gravity="start|center_vertical"
+                android:clickable="true"
+                android:focusable="true" />
+            
+            <!-- 검은색 핸들러 (중앙에 위치) -->
+            <View
+                android:id="@+id/pageIndicatorHandle"
+                android:layout_width="30dp"
+                android:layout_height="5dp"
+                android:background="#000000"
+                android:layout_gravity="start|center_vertical"
+                android:layout_marginStart="3dp"
+                android:clickable="true"
+                android:focusable="true" />
+        </FrameLayout>
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginTop="8dp"
+        android:layout_marginBottom="8dp"
+        android:visibility="gone">
+
+        <Button
+            android:id="@+id/voiceButton1"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginEnd="4dp"
+            android:text="Female #1" />
+
+        <Button
+            android:id="@+id/voiceButton2"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="4dp"
+            android:layout_marginEnd="4dp"
+            android:text="Female #2" />
+
+        <Button
+            android:id="@+id/voiceButton3"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="4dp"
+            android:layout_marginEnd="4dp"
+            android:text="Male #1" />
+
+        <Button
+            android:id="@+id/voiceButton4"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="4dp"
+            android:text="Male #2" />
+    </LinearLayout>
+
+    <Button
+        android:id="@+id/generateButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/generate_button"
+        android:visibility="gone" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:orientation="horizontal"
+        android:background="#FFFFFF"
+        android:padding="4dp"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:id="@+id/metricsText"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="2"
+            android:text=""
+            android:textSize="11sp"
+            android:maxLines="1"
+            android:scrollbars="none"
+            android:isScrollContainer="false"
+            android:minHeight="0dp"
+            android:gravity="start" />
+
+        <TextView
+            android:id="@+id/statusText"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/status_waiting"
+            android:textSize="11sp"
+            android:maxLines="1"
+            android:scrollbars="none"
+            android:isScrollContainer="false"
+            android:minHeight="0dp"
+            android:gravity="end" />
+    </LinearLayout>
+
+    <Button
+        android:id="@+id/copyErrorButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="Copy Error Message"
+        android:visibility="gone" />
+
+    <!-- 간단한 오디오 플레이어 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginTop="4dp"
+        android:background="#FFFFFF"
+        android:padding="4dp"
+        android:gravity="center">
+
+        <!-- 좌측 영역: Voice 선택 -->
+        <TextView
+            android:id="@+id/voiceSelector"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Voice: Female #1"
+            android:textSize="15.6sp"
+            android:textColor="#000000"
+            android:clickable="true"
+            android:focusable="true"
+            android:background="?android:attr/selectableItemBackground"
+            android:gravity="start|center_vertical" />
+
+        <!-- 중앙: Play 버튼 -->
+        <ImageButton
+            android:id="@+id/playButton"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_gravity="center"
+            android:enabled="false"
+            android:background="@android:color/transparent"
+            android:src="@drawable/ic_play"
+            android:scaleType="fitCenter"
+            android:contentDescription="Play button" />
+
+        <!-- 우측 영역: 재생 시간 -->
+        <TextView
+            android:id="@+id/timeDisplay"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="00:00 / 00:00"
+            android:textSize="15.6sp"
+            android:textColor="#000000"
+            android:gravity="end|center_vertical"
+            android:layout_gravity="center_vertical" />
+    </LinearLayout>
+
+</LinearLayout>
+

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 기본 테마에 Literata 폰트 적용 -->
+    <style name="AppTheme" parent="Theme.AppCompat.Light.DarkActionBar">
+        <item name="android:fontFamily">@font/literata</item>
+        <item name="android:textViewStyle">@style/AppTextStyle</item>
+        <item name="android:editTextStyle">@style/AppEditTextStyle</item>
+        <item name="android:buttonStyle">@style/AppButtonStyle</item>
+        <item name="android:windowBackground">#FFFFFF</item>
+    </style>
+    
+    <!-- TextView 기본 스타일 -->
+    <style name="AppTextStyle" parent="android:Widget.TextView">
+        <item name="android:fontFamily">@font/literata</item>
+    </style>
+    
+    <!-- EditText 기본 스타일 -->
+    <style name="AppEditTextStyle" parent="android:Widget.EditText">
+        <item name="android:fontFamily">@font/literata</item>
+    </style>
+    
+    <!-- Button 기본 스타일 -->
+    <style name="AppButtonStyle" parent="android:Widget.Button">
+        <item name="android:fontFamily">@font/literata</item>
+    </style>
+    
+    <!-- NoActionBar 테마 -->
+    <style name="AppTheme.NoActionBar" parent="Theme.AppCompat.Light.NoActionBar">
+        <item name="android:fontFamily">@font/literata</item>
+        <item name="android:textViewStyle">@style/AppTextStyle</item>
+        <item name="android:editTextStyle">@style/AppEditTextStyle</item>
+        <item name="android:buttonStyle">@style/AppButtonStyle</item>
+        <item name="android:windowBackground">#FFFFFF</item>
+    </style>
+</resources>
+
