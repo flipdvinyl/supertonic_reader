@@ -40,6 +40,7 @@ import java.util.regex.Pattern;
 
 public class MainActivity extends AppCompatActivity {
     private TextView textDisplay;
+    private TextView pageNumberDisplay;
     private FrameLayout textDisplayContainer;
     private FrameLayout pageIndicatorFrame;
     private View pageIndicatorHandle;
@@ -96,8 +97,8 @@ public class MainActivity extends AppCompatActivity {
     // Voice mapping: Female #1, Female #2, Male #1, Male #2
     private static final String SAMPLE_TEXT_FILE = "sample_text.txt";
     
-    // 페이지 분할 기준: 한 페이지에 최대 표시할 줄 수 (16줄부터 다음 페이지로 넘어감)
-    private static final int MAX_LINES_PER_PAGE = 15;
+    // 페이지 분할 기준: 한 페이지에 최대 표시할 줄 수 (15줄부터 다음 페이지로 넘어감)
+    private static final int MAX_LINES_PER_PAGE = 14;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -153,6 +154,7 @@ public class MainActivity extends AppCompatActivity {
     
     private void initializeViews() {
         textDisplay = findViewById(R.id.textDisplay);
+        pageNumberDisplay = findViewById(R.id.pageNumberDisplay);
         textDisplayContainer = findViewById(R.id.textDisplayContainer);
         pageIndicatorFrame = findViewById(R.id.pageIndicatorFrame);
         pageIndicatorHandle = findViewById(R.id.pageIndicatorHandle);
@@ -1524,89 +1526,105 @@ public class MainActivity extends AppCompatActivity {
         // 클릭 가능한 텍스트 생성 (스타일 없는 ClickableSpan)
         SpannableString spannable = new SpannableString(pageText);
         
-        // pageToSentencesMap을 사용하여 이 페이지에 나타나는 문장들 찾기
-        if (currentPageIndex < pageToSentencesMap.size()) {
-            List<Integer> pageSentences = pageToSentencesMap.get(currentPageIndex);
+        // 모든 문장을 확인하여 페이지 텍스트에 나타나는 부분을 클릭 가능하게 만들기
+        // 페이지에 걸쳐있는 문장도 클릭 가능하도록 처리
+        for (String sentence : sentences) {
+            final String sentenceText = sentence.trim();
+            if (sentenceText.isEmpty()) {
+                continue;
+            }
             
-            for (Integer sentenceIndex : pageSentences) {
-                if (sentenceIndex < 0 || sentenceIndex >= sentences.size()) {
-                    continue;
-                }
+            // 페이지 텍스트에서 문장의 일부라도 나타나는지 확인
+            // 페이지에 걸쳐있는 경우에도 클릭 가능하도록 부분 매칭 허용
+            int sentenceStartInPage = pageText.indexOf(sentenceText);
+            int clickableStart = -1;
+            int clickableEnd = -1;
+            
+            // 전체 문장이 페이지에 나타나는 경우
+            if (sentenceStartInPage >= 0) {
+                clickableStart = sentenceStartInPage;
+                clickableEnd = Math.min(sentenceStartInPage + sentenceText.length(), spannable.length());
+            } else {
+                // 전체 문장이 페이지에 없으면 문장의 일부라도 있는지 확인
+                // 문장의 시작 부분이 페이지에 있는지 확인 (페이지 끝에 걸쳐있는 경우)
+                boolean foundMatch = false;
                 
-                String sentence = sentences.get(sentenceIndex);
-                final String sentenceText = sentence.trim();
-                if (sentenceText.isEmpty()) {
-                    continue;
-                }
-                
-                // 페이지 텍스트에서 문장 위치 찾기
-                int sentenceStartInPage = pageText.indexOf(sentenceText);
-                if (sentenceStartInPage >= 0) {
-                    int sentenceEndInPage = sentenceStartInPage + sentenceText.length();
-                    
-                    if (sentenceEndInPage > spannable.length()) {
-                        sentenceEndInPage = spannable.length();
+                // 문장의 시작 부분부터 확인 (최소 10글자 이상)
+                for (int len = Math.min(sentenceText.length(), pageText.length()); len >= 10; len--) {
+                    String sentenceStart = sentenceText.substring(0, len);
+                    int startPos = pageText.indexOf(sentenceStart);
+                    if (startPos >= 0) {
+                        // 페이지 끝에 걸쳐있는 문장: 문장 처음부터 페이지 끝까지
+                        clickableStart = startPos;
+                        clickableEnd = spannable.length(); // 페이지 텍스트의 끝까지
+                        foundMatch = true;
+                        break;
                     }
-                    
-                    if (sentenceStartInPage < sentenceEndInPage && sentenceStartInPage >= 0) {
-                        // 전체 문장을 저장하여 클릭 시 전체 문장 재생
-                        final String fullSentence = sentenceText;
-                        spannable.setSpan(new ClickableSpan() {
-                            @Override
-                            public void onClick(View widget) {
-                                handleSentenceClick(fullSentence);
+                }
+                
+                // 문장의 시작 부분이 없으면 문장의 끝 부분이 페이지에 있는지 확인 (페이지 처음에 걸쳐있는 경우)
+                if (!foundMatch) {
+                    for (int len = Math.min(sentenceText.length(), pageText.length()); len >= 10; len--) {
+                        String sentenceEnd = sentenceText.substring(sentenceText.length() - len);
+                        int endPos = pageText.indexOf(sentenceEnd);
+                        if (endPos >= 0) {
+                            // 페이지 처음에 걸쳐있는 문장: 페이지 처음부터 문장 끝까지
+                            clickableStart = 0; // 페이지 텍스트의 첫글자부터
+                            clickableEnd = endPos + len;
+                            if (clickableEnd > spannable.length()) {
+                                clickableEnd = spannable.length();
                             }
-                            
-                            @Override
-                            public void updateDrawState(TextPaint ds) {
-                                super.updateDrawState(ds);
-                                // 하이퍼링크 스타일 제거 (기본 색상, 언더라인 없음)
-                                ds.setUnderlineText(false);
-                                ds.setColor(textDisplay.getCurrentTextColor());
+                            foundMatch = true;
+                            break;
+                        }
+                    }
+                }
+                
+                // 시작과 끝 부분 모두 매칭되지 않으면 중간 부분 확인
+                if (!foundMatch) {
+                    for (int i = 0; i <= sentenceText.length() - 10; i++) {
+                        String sentencePart = sentenceText.substring(i, Math.min(i + 50, sentenceText.length()));
+                        int partStart = pageText.indexOf(sentencePart);
+                        if (partStart >= 0) {
+                            // 중간 부분이 매칭된 경우: 매칭된 부분만 클릭 가능
+                            clickableStart = partStart;
+                            clickableEnd = partStart + sentencePart.length();
+                            if (clickableEnd > spannable.length()) {
+                                clickableEnd = spannable.length();
                             }
-                        }, sentenceStartInPage, sentenceEndInPage, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                            foundMatch = true;
+                            break;
+                        }
                     }
                 }
             }
-        }
-        
-        // pageToSentencesMap이 없거나 비어있는 경우 기존 방식으로 fallback
-        if (currentPageIndex >= pageToSentencesMap.size() || 
-            (currentPageIndex < pageToSentencesMap.size() && pageToSentencesMap.get(currentPageIndex).isEmpty())) {
-            for (String sentence : sentences) {
-                final String sentenceText = sentence.trim();
-                if (sentenceText.isEmpty()) {
-                    continue;
-                }
-                
-                int sentenceStartInOriginal = pageText.indexOf(sentenceText);
-                if (sentenceStartInOriginal >= 0) {
-                    int sentenceEnd = sentenceStartInOriginal + sentenceText.length();
-                    if (sentenceEnd > spannable.length()) {
-                        sentenceEnd = spannable.length();
+            
+            // 클릭 가능한 범위를 찾았으면 설정
+            if (clickableStart >= 0 && clickableEnd > clickableStart && clickableEnd <= spannable.length()) {
+                // 전체 문장을 저장하여 클릭 시 전체 문장 재생
+                final String fullSentence = sentenceText;
+                spannable.setSpan(new ClickableSpan() {
+                    @Override
+                    public void onClick(View widget) {
+                        handleSentenceClick(fullSentence);
                     }
                     
-                    if (sentenceStartInOriginal < sentenceEnd && sentenceStartInOriginal >= 0) {
-                        final String fullSentence = sentenceText;
-                        spannable.setSpan(new ClickableSpan() {
-                            @Override
-                            public void onClick(View widget) {
-                                handleSentenceClick(fullSentence);
-                            }
-                            
-                            @Override
-                            public void updateDrawState(TextPaint ds) {
-                                super.updateDrawState(ds);
-                                ds.setUnderlineText(false);
-                                ds.setColor(textDisplay.getCurrentTextColor());
-                            }
-                        }, sentenceStartInOriginal, sentenceEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                    @Override
+                    public void updateDrawState(TextPaint ds) {
+                        super.updateDrawState(ds);
+                        // 하이퍼링크 스타일 제거 (기본 색상, 언더라인 없음)
+                        ds.setUnderlineText(false);
+                        ds.setColor(textDisplay.getCurrentTextColor());
                     }
-                }
+                }, clickableStart, clickableEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
             }
         }
         
         textDisplay.setText(spannable);
+        
+        // 페이지 번호 업데이트
+        updatePageNumber();
+        
         // 커스텀 MovementMethod: 클릭만 허용하고 스크롤/키 이벤트 완전히 차단
         textDisplay.setMovementMethod(new LinkMovementMethod() {
             @Override
@@ -1650,6 +1668,29 @@ public class MainActivity extends AppCompatActivity {
                 return super.onKeyOther(widget, buffer, event);
             }
         });
+    }
+    
+    /**
+     * 페이지 번호 업데이트
+     */
+    private void updatePageNumber() {
+        if (pageNumberDisplay == null || pages.isEmpty()) {
+            if (pageNumberDisplay != null) {
+                pageNumberDisplay.setText("");
+            }
+            return;
+        }
+        
+        int currentPageNumber = currentPageIndex + 1;
+        int totalPages = pages.size();
+        String pageNumberText = "—  " + currentPageNumber + "  —";
+        
+        // 본문 폰트 크기의 70%로 설정
+        float baseTextSize = textDisplay.getTextSize();
+        float pageNumberTextSize = baseTextSize * 0.7f;
+        pageNumberDisplay.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, pageNumberTextSize);
+        
+        pageNumberDisplay.setText(pageNumberText);
     }
     
     /**
@@ -2320,6 +2361,8 @@ public class MainActivity extends AppCompatActivity {
      * 페이지 인디케이터 업데이트
      */
     private void updatePageIndicator() {
+        // 페이지 번호도 함께 업데이트
+        updatePageNumber();
         if (pages.isEmpty() || pageIndicatorFrame == null || pageIndicatorHandle == null || pageIndicatorHandleBox == null) {
             return;
         }

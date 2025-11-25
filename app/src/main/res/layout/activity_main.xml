@@ -35,6 +35,22 @@
             android:clickable="true"
             android:longClickable="false"
             android:elevation="1dp" />
+        
+        <!-- 페이지 번호 표시 -->
+        <TextView
+            android:id="@+id/pageNumberDisplay"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom|center_horizontal"
+            android:layout_marginBottom="15dp"
+            android:gravity="center"
+            android:text=""
+            android:textColor="#000000"
+            android:background="@android:color/transparent"
+            android:focusable="false"
+            android:focusableInTouchMode="false"
+            android:clickable="false"
+            android:elevation="2dp" />
     </FrameLayout>
     
     <!-- 페이지 인디케이터 -->
