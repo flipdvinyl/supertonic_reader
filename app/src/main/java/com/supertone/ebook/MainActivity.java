@@ -97,12 +97,15 @@ public class MainActivity extends AppCompatActivity {
     // Voice mapping: Female #1, Female #2, Male #1, Male #2
     private static final String SAMPLE_TEXT_FILE = "sample_text.txt";
     
-    // 페이지 분할 기준: 한 페이지에 최대 표시할 줄 수 (15줄부터 다음 페이지로 넘어감)
-    private static final int MAX_LINES_PER_PAGE = 14;
+    // 페이지 분할 기준: 한 페이지에 최대 표시할 줄 수 (동적으로 계산됨)
+    private int maxLinesPerPage = 14; // 기본값, setupPages()에서 계산하여 설정
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        
+        // 상태바 숨기기
+        hideStatusBar();
         
         // ActionBar 숨기기 (헤더 영역 안보이게 처리)
         if (getSupportActionBar() != null) {
@@ -125,6 +128,42 @@ public class MainActivity extends AppCompatActivity {
         
         // 진행 바 업데이트 시작
         startProgressUpdate();
+    }
+    
+    /**
+     * 상태바 숨기기
+     */
+    private void hideStatusBar() {
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                // Android 11 (API 30) 이상
+                getWindow().setDecorFitsSystemWindows(false);
+                android.view.WindowInsetsController controller = getWindow().getInsetsController();
+                if (controller != null) {
+                    controller.hide(android.view.WindowInsets.Type.statusBars());
+                    controller.setSystemBarsBehavior(android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                }
+            } else {
+                // Android 10 이하
+                View decorView = getWindow().getDecorView();
+                int uiOptions = View.SYSTEM_UI_FLAG_FULLSCREEN
+                    | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN;
+                decorView.setSystemUiVisibility(uiOptions);
+            }
+        } catch (Exception e) {
+            // 에러 발생 시 로그만 남기고 계속 진행
+            android.util.Log.e("MainActivity", "Error hiding status bar: " + e.getMessage());
+        }
+    }
+    
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {
+            // 포커스를 받을 때마다 상태바 숨기기 (다른 앱에서 돌아올 때 등)
+            hideStatusBar();
+        }
     }
     
     /**
@@ -1384,6 +1423,11 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
             
+            // 최대 줄 수 계산 (앱 실행 시 한 번만 계산)
+            if (pageHeight > 0 && textDisplay != null) {
+                calculateMaxLinesPerPage();
+            }
+            
             if (pageWidth > 0 && pageHeight > 0) {
                 calculatePages();
                 displayCurrentPage();
@@ -1393,7 +1437,41 @@ public class MainActivity extends AppCompatActivity {
     }
     
     /**
-     * 페이지 계산 - StaticLayout을 사용하여 정확히 15줄 기준으로 페이지 분리
+     * 최대 줄 수 계산 - 텍스트뷰 높이와 폰트/줄간격 정보를 기반으로 계산
+     * (최대 줄 수 - 9)을 페이지당 줄수로 사용
+     */
+    private void calculateMaxLinesPerPage() {
+        if (textDisplay == null || pageHeight <= 0) {
+            maxLinesPerPage = 14; // 기본값
+            return;
+        }
+        
+        // TextView의 Paint 설정 가져오기
+        TextPaint textPaint = new TextPaint(textDisplay.getPaint());
+        float textSize = textPaint.getTextSize();
+        
+        // TextView의 줄간격 정보 가져오기
+        float lineSpacingMultiplier = textDisplay.getLineSpacingMultiplier();
+        float lineSpacingExtra = textDisplay.getLineSpacingExtra();
+        
+        // 한 줄의 높이 계산
+        // lineSpacingMultiplier는 기본 텍스트 높이에 곱해지는 배수
+        // lineSpacingExtra는 추가로 더해지는 여백
+        float lineHeight = textSize * lineSpacingMultiplier + lineSpacingExtra;
+        
+        // 최대 줄 수 계산 (소수점 버림)
+        int maxLines = (int) (pageHeight / lineHeight);
+        
+        // (최대 줄 수 - 9)을 페이지당 줄수로 사용
+        maxLinesPerPage = Math.max(1, maxLines - 9); // 최소 1줄 보장
+        
+        android.util.Log.d("MainActivity", "Calculated maxLinesPerPage: " + maxLinesPerPage + 
+            " (maxLines: " + maxLines + ", pageHeight: " + pageHeight + 
+            ", lineHeight: " + lineHeight + ")");
+    }
+    
+    /**
+     * 페이지 계산 - StaticLayout을 사용하여 계산된 줄 수 기준으로 페이지 분리
      * TextView의 실제 설정을 사용하여 StaticLayout 생성
      */
     private void calculatePages() {
@@ -1430,10 +1508,10 @@ public class MainActivity extends AppCompatActivity {
         int totalLines = fullLayout.getLineCount();
         int currentLine = 0;
         
-        // 15줄씩 페이지 분할
+        // 계산된 줄 수씩 페이지 분할
         while (currentLine < totalLines) {
-            // 현재 페이지의 마지막 줄 (15줄째, 인덱스는 14)
-            int pageEndLine = Math.min(currentLine + MAX_LINES_PER_PAGE - 1, totalLines - 1);
+            // 현재 페이지의 마지막 줄 (maxLinesPerPage줄째, 인덱스는 maxLinesPerPage - 1)
+            int pageEndLine = Math.min(currentLine + maxLinesPerPage - 1, totalLines - 1);
             
             // 해당 줄의 시작과 끝 위치 찾기
             int textStart = fullLayout.getLineStart(currentLine);
@@ -1453,19 +1531,19 @@ public class MainActivity extends AppCompatActivity {
                 false
             );
             
-            // 정확히 15줄이 되도록 조정
+            // 정확히 maxLinesPerPage줄이 되도록 조정
             int pageLineCount = pageLayout.getLineCount();
-            if (pageLineCount != MAX_LINES_PER_PAGE && pageEndLine < totalLines - 1) {
-                // 15줄이 아니면 조정
-                if (pageLineCount > MAX_LINES_PER_PAGE) {
-                    // 15줄을 넘으면 이전 줄의 끝으로 조정
+            if (pageLineCount != maxLinesPerPage && pageEndLine < totalLines - 1) {
+                // maxLinesPerPage줄이 아니면 조정
+                if (pageLineCount > maxLinesPerPage) {
+                    // maxLinesPerPage줄을 넘으면 이전 줄의 끝으로 조정
                     if (pageEndLine > currentLine) {
                         pageEndLine = pageEndLine - 1;
                         textEnd = fullLayout.getLineEnd(pageEndLine);
                         pageText = fullText.substring(textStart, textEnd);
                     }
-                } else if (pageLineCount < MAX_LINES_PER_PAGE && pageEndLine < totalLines - 1) {
-                    // 15줄보다 적으면 다음 줄까지 포함 시도
+                } else if (pageLineCount < maxLinesPerPage && pageEndLine < totalLines - 1) {
+                    // maxLinesPerPage줄보다 적으면 다음 줄까지 포함 시도
                     int nextLineEnd = Math.min(pageEndLine + 1, totalLines - 1);
                     int nextTextEnd = fullLayout.getLineEnd(nextLineEnd);
                     String nextPageText = fullText.substring(textStart, nextTextEnd);
@@ -1478,7 +1556,7 @@ public class MainActivity extends AppCompatActivity {
                         lineSpacingExtra,
                         false
                     );
-                    if (nextPageLayout.getLineCount() <= MAX_LINES_PER_PAGE) {
+                    if (nextPageLayout.getLineCount() <= maxLinesPerPage) {
                         pageEndLine = nextLineEnd;
                         textEnd = nextTextEnd;
                         pageText = nextPageText;
@@ -1537,86 +1615,67 @@ public class MainActivity extends AppCompatActivity {
             // 페이지 텍스트에서 문장의 일부라도 나타나는지 확인
             // 페이지에 걸쳐있는 경우에도 클릭 가능하도록 부분 매칭 허용
             int sentenceStartInPage = pageText.indexOf(sentenceText);
-            int clickableStart = -1;
-            int clickableEnd = -1;
             
-            // 전체 문장이 페이지에 나타나는 경우
-            if (sentenceStartInPage >= 0) {
-                clickableStart = sentenceStartInPage;
-                clickableEnd = Math.min(sentenceStartInPage + sentenceText.length(), spannable.length());
-            } else {
-                // 전체 문장이 페이지에 없으면 문장의 일부라도 있는지 확인
-                // 문장의 시작 부분이 페이지에 있는지 확인 (페이지 끝에 걸쳐있는 경우)
-                boolean foundMatch = false;
-                
-                // 문장의 시작 부분부터 확인 (최소 10글자 이상)
-                for (int len = Math.min(sentenceText.length(), pageText.length()); len >= 10; len--) {
-                    String sentenceStart = sentenceText.substring(0, len);
-                    int startPos = pageText.indexOf(sentenceStart);
-                    if (startPos >= 0) {
-                        // 페이지 끝에 걸쳐있는 문장: 문장 처음부터 페이지 끝까지
-                        clickableStart = startPos;
-                        clickableEnd = spannable.length(); // 페이지 텍스트의 끝까지
-                        foundMatch = true;
+            // 전체 문장이 페이지에 없으면 문장의 일부라도 있는지 확인
+            if (sentenceStartInPage < 0) {
+                // 문장의 일부가 페이지에 나타나는지 확인 (최소 10글자 이상)
+                for (int i = 0; i <= sentenceText.length() - 10; i++) {
+                    String sentencePart = sentenceText.substring(i, Math.min(i + 50, sentenceText.length()));
+                    sentenceStartInPage = pageText.indexOf(sentencePart);
+                    if (sentenceStartInPage >= 0) {
+                        // 부분 매칭을 찾았지만, 전체 문장을 클릭 가능하게 만들기 위해
+                        // 페이지에 나타나는 부분만 클릭 가능하게 설정
+                        int sentenceEndInPage = sentenceStartInPage + sentencePart.length();
+                        if (sentenceEndInPage > spannable.length()) {
+                            sentenceEndInPage = spannable.length();
+                        }
+                        
+                        if (sentenceStartInPage < sentenceEndInPage && sentenceStartInPage >= 0) {
+                            // 전체 문장을 저장하여 클릭 시 전체 문장 재생
+                            final String fullSentence = sentenceText;
+                            spannable.setSpan(new ClickableSpan() {
+                                @Override
+                                public void onClick(View widget) {
+                                    handleSentenceClick(fullSentence);
+                                }
+                                
+                                @Override
+                                public void updateDrawState(TextPaint ds) {
+                                    super.updateDrawState(ds);
+                                    // 하이퍼링크 스타일 제거 (기본 색상, 언더라인 없음)
+                                    ds.setUnderlineText(false);
+                                    ds.setColor(textDisplay.getCurrentTextColor());
+                                }
+                            }, sentenceStartInPage, sentenceEndInPage, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                        }
                         break;
                     }
                 }
-                
-                // 문장의 시작 부분이 없으면 문장의 끝 부분이 페이지에 있는지 확인 (페이지 처음에 걸쳐있는 경우)
-                if (!foundMatch) {
-                    for (int len = Math.min(sentenceText.length(), pageText.length()); len >= 10; len--) {
-                        String sentenceEnd = sentenceText.substring(sentenceText.length() - len);
-                        int endPos = pageText.indexOf(sentenceEnd);
-                        if (endPos >= 0) {
-                            // 페이지 처음에 걸쳐있는 문장: 페이지 처음부터 문장 끝까지
-                            clickableStart = 0; // 페이지 텍스트의 첫글자부터
-                            clickableEnd = endPos + len;
-                            if (clickableEnd > spannable.length()) {
-                                clickableEnd = spannable.length();
-                            }
-                            foundMatch = true;
-                            break;
-                        }
-                    }
+            } else {
+                // 전체 문장이 페이지에 나타나는 경우
+                int sentenceEndInPage = sentenceStartInPage + sentenceText.length();
+                if (sentenceEndInPage > spannable.length()) {
+                    sentenceEndInPage = spannable.length();
                 }
                 
-                // 시작과 끝 부분 모두 매칭되지 않으면 중간 부분 확인
-                if (!foundMatch) {
-                    for (int i = 0; i <= sentenceText.length() - 10; i++) {
-                        String sentencePart = sentenceText.substring(i, Math.min(i + 50, sentenceText.length()));
-                        int partStart = pageText.indexOf(sentencePart);
-                        if (partStart >= 0) {
-                            // 중간 부분이 매칭된 경우: 매칭된 부분만 클릭 가능
-                            clickableStart = partStart;
-                            clickableEnd = partStart + sentencePart.length();
-                            if (clickableEnd > spannable.length()) {
-                                clickableEnd = spannable.length();
-                            }
-                            foundMatch = true;
-                            break;
+                if (sentenceStartInPage < sentenceEndInPage && sentenceStartInPage >= 0) {
+                    // 전체 문장을 저장하여 클릭 시 전체 문장 재생
+                    final String fullSentence = sentenceText;
+                    spannable.setSpan(new ClickableSpan() {
+                        @Override
+                        public void onClick(View widget) {
+                            handleSentenceClick(fullSentence);
                         }
-                    }
+                        
+                        @Override
+                        public void updateDrawState(TextPaint ds) {
+                            super.updateDrawState(ds);
+                            // 하이퍼링크 스타일 제거 (기본 색상, 언더라인 없음)
+                            ds.setUnderlineText(false);
+                            ds.setColor(textDisplay.getCurrentTextColor());
+                        }
+                    }, sentenceStartInPage, sentenceEndInPage, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
                 }
-            }
-            
-            // 클릭 가능한 범위를 찾았으면 설정
-            if (clickableStart >= 0 && clickableEnd > clickableStart && clickableEnd <= spannable.length()) {
-                // 전체 문장을 저장하여 클릭 시 전체 문장 재생
-                final String fullSentence = sentenceText;
-                spannable.setSpan(new ClickableSpan() {
-                    @Override
-                    public void onClick(View widget) {
-                        handleSentenceClick(fullSentence);
-                    }
-                    
-                    @Override
-                    public void updateDrawState(TextPaint ds) {
-                        super.updateDrawState(ds);
-                        // 하이퍼링크 스타일 제거 (기본 색상, 언더라인 없음)
-                        ds.setUnderlineText(false);
-                        ds.setColor(textDisplay.getCurrentTextColor());
-                    }
-                }, clickableStart, clickableEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
             }
         }
         
