@@ -28,7 +28,7 @@ public class SupertonicTTS {
     private static final String FILES_ONNX_DIR = "onnx";
     
     // 오디오 파라미터
-    private static final int DEFAULT_TOTAL_STEP = 7; // Denoising steps (더 높을수록 품질 향상, 속도 저하)
+    private static final int DEFAULT_TOTAL_STEP = 5; // Denoising steps (더 높을수록 품질 향상, 속도 저하)
     
     public SupertonicTTS(Context context) throws Exception {
         this.context = context;
