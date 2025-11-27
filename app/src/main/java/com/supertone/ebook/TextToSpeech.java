@@ -44,7 +44,7 @@ class TextToSpeech {
         this.ldim = config.ttl.latentDim;
     }
     
-    public SupertonicHelper.TTSResult call(List<String> textList, SupertonicHelper.Style style, int totalStep, OrtEnvironment env) 
+    public SupertonicHelper.TTSResult call(List<String> textList, SupertonicHelper.Style style, int totalStep, double speechLength, OrtEnvironment env) 
             throws OrtException {
         int bsz = textList.size();
         
@@ -70,6 +70,12 @@ class TextToSpeech {
             duration = ((float[][]) dpValue)[0];
         } else {
             duration = (float[]) dpValue;
+        }
+        
+        // 속도 조절: speechLength를 duration에 적용
+        // speechLength가 0.5면 2배속 (duration을 0.5배로), 2.0이면 0.5배속 (duration을 2배로)
+        for (int i = 0; i < duration.length; i++) {
+            duration[i] = (float) (duration[i] * speechLength);
         }
         
         // Encode text

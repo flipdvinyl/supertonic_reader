@@ -80,8 +80,11 @@ public class SupertonicTTS {
     
     /**
      * 텍스트를 오디오로 변환
+     * @param text 변환할 텍스트
+     * @param voiceId 목소리 ID
+     * @param speechLength 발화 길이 (1.0 = 1x, 0.5 = 2x, 2.0 = 0.5x)
      */
-    public byte[] generate(String text, String voiceId) throws Exception {
+    public byte[] generate(String text, String voiceId, double speechLength) throws Exception {
         if (!initialized || textToSpeech == null) {
             throw new IllegalStateException("TTS 엔진이 초기화되지 않았습니다");
         }
@@ -95,8 +98,8 @@ public class SupertonicTTS {
             // 텍스트 리스트
             List<String> textList = Arrays.asList(text);
             
-            // TTS 생성
-            SupertonicHelper.TTSResult result = textToSpeech.call(textList, style, DEFAULT_TOTAL_STEP, ortEnv);
+            // TTS 생성 (speechLength 적용)
+            SupertonicHelper.TTSResult result = textToSpeech.call(textList, style, DEFAULT_TOTAL_STEP, speechLength, ortEnv);
             
             // WAV 파일로 변환
             File tempWav = new File(context.getCacheDir(), "tts_output.wav");

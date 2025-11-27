@@ -1,3 +1,4 @@
+
 package com.supertone.ebook;
 
 import android.content.ClipData;
@@ -12,6 +13,8 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.view.MotionEvent;
+import android.view.GestureDetector;
+import android.view.GestureDetector.SimpleOnGestureListener;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Path;
@@ -23,20 +26,27 @@ import android.text.Spanned;
 import android.text.style.ClickableSpan;
 import android.text.style.ReplacementSpan;
 import android.text.style.BackgroundColorSpan;
+import android.text.style.ForegroundColorSpan;
 import android.text.method.LinkMovementMethod;
 import android.text.TextPaint;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowInsetsCompat;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Queue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.regex.Pattern;
 
 public class MainActivity extends AppCompatActivity {
@@ -53,11 +63,28 @@ public class MainActivity extends AppCompatActivity {
     private String selectedVoice = "voice2"; // Default: Female #1
     private String selectedVoiceName = "Female #1"; // 현재 선택된 보이스 이름
     private TextView voiceSelector; // Voice 선택 TextView
+    private TextView speedSelector; // Speed 선택 TextView
+    private String selectedSpeed = "1x"; // 기본 속도 1x
+    
+    /**
+     * 속도 문자열을 speechLength로 변환
+     * 발화길이 1 = 1x, 발화길이 2 = 0.5x, 발화길이 0.5 = 2x
+     */
+    private double speedToSpeechLength(String speed) {
+        // "2x", "1.5x", "1.2x", "1x", "0.8x" -> speechLength
+        if (speed.equals("2x")) return 0.5;
+        if (speed.equals("1.5x")) return 1.0 / 1.5;
+        if (speed.equals("1.2x")) return 1.0 / 1.2;
+        if (speed.equals("1x")) return 1.0;
+        if (speed.equals("0.8x")) return 1.0 / 0.8;
+        return 1.0; // 기본값
+    }
     private Button generateButton;
     private android.widget.ImageButton playButton;
     private Button copyErrorButton;
     private TextView statusText;
     private TextView metricsText;
+    private TextView mediaMetricsText; // 미디어 플레이어 섹션의 CPS/RTF 표시
     private TextView timeDisplay; // 재생 시간 표시 (현재/전체)
     private android.widget.SeekBar progressBar;
     private MediaPlayer mediaPlayer;
@@ -76,13 +103,24 @@ public class MainActivity extends AppCompatActivity {
     private boolean isGenerating = false;
     private boolean isPaused = false;
     private java.util.concurrent.Future<?> currentGenerationTask = null;
+    private java.util.concurrent.Future<?> backgroundGenerationTask = null; // 백그라운드 생성 작업
+    private Queue<Integer> backgroundGenerationQueue = new LinkedBlockingQueue<>(); // 백그라운드 생성 큐
     private long generationStartTime = 0;
     private int totalTextLength = 0;
     private double totalAudioDuration = 0; // 생성된 모든 청크의 총 재생 시간
     private List<Double> chunkProcessingTimes = new ArrayList<>(); // 각 청크의 생성 시간
-    private List<Double> chunkCPSList = new ArrayList<>(); // 각 청크의 CPS
-    private List<Double> chunkRTFList = new ArrayList<>(); // 각 청크의 RTF
+    private List<Double> chunkCPSList = new ArrayList<>(); // 각 청크의 CPS (레거시, 평균 계산용)
+    private List<Double> chunkRTFList = new ArrayList<>(); // 각 청크의 RTF (레거시, 평균 계산용)
+    private Map<Integer, Double> chunkProcessingTimeMap = new HashMap<>(); // 청크 절대 인덱스 -> Processing time 매핑
+    private Map<Integer, Double> chunkCPSMap = new HashMap<>(); // 청크 절대 인덱스 -> CPS 매핑
+    private Map<Integer, Double> chunkRTFMap = new HashMap<>(); // 청크 절대 인덱스 -> RTF 매핑
+    private Map<Integer, ChunkPageInfo> chunkPageInfoCache = new HashMap<>(); // 청크 절대 인덱스 -> ChunkPageInfo 캐시
     private double totalChunkProcessingTime = 0; // 모든 청크 생성 시간의 총합
+    
+    // 오디오 캐시 관리
+    private boolean keepAudioCache = true; // true: 앱 실행 시 캐시 유지, false: 캐시 삭제
+    private boolean autoCleanAudioCache = true; // true: 캐시 자동 제거 활성화, false: 비활성화
+    private int autoCleanAudioCacheLimit = 30; // 캐시 자동 제거 갯수 (기본 30개)
     
     // Page-based display variables
     private String fullText = "";
@@ -96,6 +134,16 @@ public class MainActivity extends AppCompatActivity {
     private boolean isDraggingIndicator = false;
     private float indicatorStartX = 0;
     private Runnable highlightRemoveRunnable = null; // 하이라이트 제거를 위한 Runnable 추적
+    
+    // 스크롤/클릭 구분을 위한 변수
+    private float touchDownX = 0;
+    private float touchDownY = 0;
+    private long touchDownTime = 0;
+    private static final float MAX_CLICK_DISTANCE = 10.0f; // 픽셀 단위
+    private static final long MAX_CLICK_DURATION = 200; // 밀리초 단위
+    
+    // 스와이프 제스처 감지
+    private GestureDetector gestureDetector;
     
     // Voice mapping: Female #1, Female #2, Male #1, Male #2
     private static final String SAMPLE_TEXT_FILE = "sample_text.txt";
@@ -117,14 +165,77 @@ public class MainActivity extends AppCompatActivity {
         
         setContentView(R.layout.activity_main);
         
+        // WindowInsets 처리: OS 네비게이션 바 영역을 고려한 레이아웃 설정
+        View rootLayout = findViewById(R.id.rootLayout);
+        if (rootLayout == null) {
+            // 루트 레이아웃이 없으면 content view 사용
+            rootLayout = findViewById(android.R.id.content);
+        }
+        if (rootLayout != null) {
+            ViewCompat.setOnApplyWindowInsetsListener(rootLayout, (v, windowInsets) -> {
+                int systemBarsType = WindowInsetsCompat.Type.systemBars();
+                int bottomInset = windowInsets.getInsets(systemBarsType).bottom;
+                
+                // 하단 시스템 바 영역만큼 padding 추가
+                if (bottomInset > 0) {
+                    v.setPadding(v.getPaddingLeft(), v.getPaddingTop(), 
+                        v.getPaddingRight(), bottomInset);
+                }
+                
+                return windowInsets;
+            });
+        }
+        
         initializeViews();
         setupVoiceButtons();
+        setupSpeedSelector();
         setupButtons();
         initializeTTS();
         
         executorService = Executors.newSingleThreadExecutor();
         mainHandler = new Handler(Looper.getMainLooper());
         progressHandler = new Handler(Looper.getMainLooper());
+        
+        // 스와이프 제스처 감지 초기화
+        gestureDetector = new GestureDetector(this, new SimpleOnGestureListener() {
+            @Override
+            public boolean onFling(MotionEvent e1, MotionEvent e2, float velocityX, float velocityY) {
+                if (e1 == null || e2 == null) {
+                    return false;
+                }
+                
+                float deltaX = e2.getX() - e1.getX();
+                float deltaY = e2.getY() - e1.getY();
+                
+                // 수평 스와이프인지 확인 (수직 이동보다 수평 이동이 더 큰 경우)
+                if (Math.abs(deltaX) > Math.abs(deltaY) && Math.abs(deltaX) > 100) {
+                    // 좌->우 스와이프 (이전 페이지)
+                    if (deltaX > 0) {
+                        if (currentPageIndex > 0) {
+                            currentPageIndex--;
+                            displayCurrentPage();
+                            updatePageIndicator();
+                            return true;
+                        }
+                    }
+                    // 우->좌 스와이프 (다음 페이지)
+                    else {
+                        if (currentPageIndex < pages.size() - 1) {
+                            currentPageIndex++;
+                            displayCurrentPage();
+                            updatePageIndicator();
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }
+        });
+        
+        // 오디오 캐시 삭제 (keepAudioCache가 false일 때)
+        if (!keepAudioCache) {
+            clearAllAudioCache();
+        }
         
         // 샘플 텍스트 프리셋 설정
         loadSampleText();
@@ -197,6 +308,10 @@ public class MainActivity extends AppCompatActivity {
     private void initializeViews() {
         textDisplay = findViewById(R.id.textDisplay);
         pageNumberDisplay = findViewById(R.id.pageNumberDisplay);
+        // 페이지 번호 아래로 3px 이동
+        if (pageNumberDisplay != null) {
+            pageNumberDisplay.setTranslationY(8 * getResources().getDisplayMetrics().density);
+        }
         textDisplayContainer = findViewById(R.id.textDisplayContainer);
         pageIndicatorFrame = findViewById(R.id.pageIndicatorFrame);
         pageIndicatorHandle = findViewById(R.id.pageIndicatorHandle);
@@ -206,12 +321,19 @@ public class MainActivity extends AppCompatActivity {
         voiceButton3 = findViewById(R.id.voiceButton3);
         voiceButton4 = findViewById(R.id.voiceButton4);
         voiceSelector = findViewById(R.id.voiceSelector);
+        speedSelector = findViewById(R.id.speedSelector);
         generateButton = findViewById(R.id.generateButton);
         playButton = findViewById(R.id.playButton);
         copyErrorButton = findViewById(R.id.copyErrorButton);
-        statusText = findViewById(R.id.statusText);
-        metricsText = findViewById(R.id.metricsText);
+        // 로그 섹션 제거됨
+        statusText = null;
+        metricsText = null;
+        mediaMetricsText = findViewById(R.id.mediaMetricsText);
         timeDisplay = findViewById(R.id.timeDisplay);
+        // 재생시간 표시 숨김
+        if (timeDisplay != null) {
+            timeDisplay.setVisibility(View.GONE);
+        }
         progressBar = findViewById(R.id.progressBar);
         
         // TextView 스크롤 완전히 비활성화
@@ -219,6 +341,9 @@ public class MainActivity extends AppCompatActivity {
         textDisplay.setFocusableInTouchMode(false);
         textDisplay.setClickable(true);
         textDisplay.setLongClickable(false);
+        
+        // 클릭 시 녹색 배경 피드백 비활성화
+        textDisplay.setHighlightColor(0x00000000); // 투명색
         
         // 화살표 키 이벤트 무시 (문장 선택 방지)
         textDisplay.setOnKeyListener((v, keyCode, event) -> {
@@ -234,6 +359,49 @@ public class MainActivity extends AppCompatActivity {
         
         // 텍스트 클릭 이벤트 설정
         setupTextClickHandler();
+        
+        // 커스텀 MovementMethod 설정 (한 번만 설정)
+        textDisplay.setMovementMethod(new LinkMovementMethod() {
+            @Override
+            public boolean canSelectArbitrarily() {
+                return false;
+            }
+            
+            @Override
+            public boolean onTouchEvent(android.widget.TextView widget, android.text.Spannable buffer, android.view.MotionEvent event) {
+                // 스크롤을 완전히 차단하고 클릭만 허용
+                // MOVE 이벤트는 무시하여 스크롤 방지
+                if (event.getAction() == MotionEvent.ACTION_MOVE) {
+                    return false;
+                }
+                return super.onTouchEvent(widget, buffer, event);
+            }
+            
+            @Override
+            public boolean onKeyDown(android.widget.TextView widget, android.text.Spannable buffer, int keyCode, android.view.KeyEvent event) {
+                // 위/아래/좌/우 화살표 키 무시
+                if (keyCode == android.view.KeyEvent.KEYCODE_DPAD_UP ||
+                    keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN ||
+                    keyCode == android.view.KeyEvent.KEYCODE_DPAD_LEFT ||
+                    keyCode == android.view.KeyEvent.KEYCODE_DPAD_RIGHT) {
+                    return true; // 이벤트 소비하여 처리하지 않음
+                }
+                return super.onKeyDown(widget, buffer, keyCode, event);
+            }
+            
+            @Override
+            public boolean onKeyOther(android.widget.TextView widget, android.text.Spannable buffer, android.view.KeyEvent event) {
+                // 위/아래/좌/우 화살표 키 무시
+                int keyCode = event.getKeyCode();
+                if (keyCode == android.view.KeyEvent.KEYCODE_DPAD_UP ||
+                    keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN ||
+                    keyCode == android.view.KeyEvent.KEYCODE_DPAD_LEFT ||
+                    keyCode == android.view.KeyEvent.KEYCODE_DPAD_RIGHT) {
+                    return true; // 이벤트 소비하여 처리하지 않음
+                }
+                return super.onKeyOther(widget, buffer, event);
+            }
+        });
         
         // 페이지 인디케이터 설정
         setupPageIndicator();
@@ -377,6 +545,100 @@ public class MainActivity extends AppCompatActivity {
         });
     }
     
+    private void setupSpeedSelector() {
+        // Set default selection (1x)
+        updateSpeedSelector();
+        
+        // Speed 선택 TextView 클릭 시 팝업 메뉴 표시
+        speedSelector.setOnClickListener(v -> {
+            android.widget.PopupMenu popupMenu = new android.widget.PopupMenu(this, speedSelector);
+            popupMenu.getMenu().add(0, 0, 0, "2x");
+            popupMenu.getMenu().add(0, 1, 0, "1.5x");
+            popupMenu.getMenu().add(0, 2, 0, "1.2x");
+            popupMenu.getMenu().add(0, 3, 0, "1x");
+            popupMenu.getMenu().add(0, 4, 0, "0.8x");
+            
+            popupMenu.setOnMenuItemClickListener(item -> {
+                String previousSpeed = selectedSpeed;
+                switch (item.getItemId()) {
+                    case 0:
+                        selectedSpeed = "2x";
+                        break;
+                    case 1:
+                        selectedSpeed = "1.5x";
+                        break;
+                    case 2:
+                        selectedSpeed = "1.2x";
+                        break;
+                    case 3:
+                        selectedSpeed = "1x";
+                        break;
+                    case 4:
+                        selectedSpeed = "0.8x";
+                        break;
+                }
+                updateSpeedSelector();
+                popupMenu.dismiss();
+                
+                // Speed 변경 시 현재 읽던 문장부터 새롭게 청크 생성 및 재생
+                if (!previousSpeed.equals(selectedSpeed)) {
+                    handleSpeedChange();
+                }
+                
+                return true;
+            });
+            
+            popupMenu.show();
+            
+            // PopupMenu가 표시된 후 배경색 설정 (#aaa)
+            mainHandler.post(() -> {
+                try {
+                    java.lang.reflect.Field mPopupField = popupMenu.getClass().getDeclaredField("mPopup");
+                    mPopupField.setAccessible(true);
+                    Object mPopup = mPopupField.get(popupMenu);
+                    
+                    // ListView 가져오기
+                    java.lang.reflect.Method getListViewMethod = mPopup.getClass().getDeclaredMethod("getListView");
+                    getListViewMethod.setAccessible(true);
+                    android.widget.ListView listView = (android.widget.ListView) getListViewMethod.invoke(mPopup);
+                    
+                    if (listView != null) {
+                        // 배경색 #999 설정
+                        listView.setBackgroundColor(0xFF999999);
+                        
+                        // 보더 1px #999 추가
+                        android.graphics.drawable.GradientDrawable borderDrawable = new android.graphics.drawable.GradientDrawable();
+                        borderDrawable.setColor(0xFF999999);
+                        borderDrawable.setStroke(1, 0xFF999999); // 1px #999 보더
+                        listView.setBackground(borderDrawable);
+                    }
+                } catch (Exception e) {
+                    // 리플렉션 실패 시 무시 (배경색 설정 실패해도 기능은 정상 작동)
+                    android.util.Log.d("MainActivity", "Failed to set popup menu background: " + e.getMessage());
+                }
+            });
+        });
+    }
+    
+    private void updateSpeedSelector() {
+        if (speedSelector != null) {
+            // "Speed\n속도값" 형식으로 표시 (두 줄)
+            String fullText = "Speed\n" + selectedSpeed;
+            SpannableString spannable = new SpannableString(fullText);
+            
+            // "Speed" 부분을 #999 색상으로 설정
+            spannable.setSpan(new android.text.style.ForegroundColorSpan(0xFF999999), 
+                0, "Speed".length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            
+            // 속도값에 물결무늬 언더라인 추가
+            int speedValueStart = "Speed\n".length();
+            int speedValueEnd = spannable.length();
+            spannable.setSpan(new WavyUnderlineSpan(), speedValueStart, speedValueEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            
+            speedSelector.setText(spannable);
+        }
+    }
+    
     private void updateVoiceButtonSelection(Button selectedButton) {
         // Reset all buttons
         voiceButton1.setAlpha(0.5f);
@@ -390,11 +652,19 @@ public class MainActivity extends AppCompatActivity {
     
     private void updateVoiceSelector() {
         if (voiceSelector != null) {
-            SpannableString spannable = new SpannableString("Voice: " + selectedVoiceName);
+            // "Voice\n보이스이름" 형식으로 표시 (두 줄)
+            String fullText = "Voice\n" + selectedVoiceName;
+            SpannableString spannable = new SpannableString(fullText);
+            
+            // "Voice" 부분을 #999 색상으로 설정
+            spannable.setSpan(new android.text.style.ForegroundColorSpan(0xFF999999), 
+                0, "Voice".length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            
             // 보이스 이름에 물결무늬 언더라인 추가
-            int start = "Voice: ".length();
-            int end = spannable.length();
-            spannable.setSpan(new WavyUnderlineSpan(), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            int voiceNameStart = "Voice\n".length();
+            int voiceNameEnd = spannable.length();
+            spannable.setSpan(new WavyUnderlineSpan(), voiceNameStart, voiceNameEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            
             voiceSelector.setText(spannable);
         }
     }
@@ -444,11 +714,18 @@ public class MainActivity extends AppCompatActivity {
     }
     
     private void setupButtons() {
-        generateButton.setOnClickListener(v -> generateAudio());
+        generateButton.setOnClickListener(v -> {
+            // 1번 센텐스부터 재생
+            if (!sentences.isEmpty()) {
+                generateAudio("0", null, null);
+            }
+        });
         playButton.setOnClickListener(v -> {
-            // 청크가 없으면 Generate 기능 실행
+            // 청크가 없으면 1번 센텐스부터 재생
             if (audioChunks.isEmpty()) {
-                generateAudio();
+                if (!sentences.isEmpty()) {
+                    generateAudio("0", null, null);
+                }
                 return;
             }
             
@@ -456,6 +733,9 @@ public class MainActivity extends AppCompatActivity {
                 pauseAudio();
                 playButton.setImageResource(R.drawable.ic_play);
             } else {
+                // 재생 시작 전에 현재 재생 중인 세그먼트가 있는 페이지로 이동
+                navigateToCurrentPlayingChunkPage();
+                
                 playAudio();
                 playButton.setImageResource(R.drawable.ic_pause);
             }
@@ -471,228 +751,6 @@ public class MainActivity extends AppCompatActivity {
             updateStatus("TTS engine initialization failed: " + e.getMessage());
             // UI 테스트를 위해 버튼은 활성화 유지
         }
-    }
-    
-    private void generateAudio() {
-        if (fullText.isEmpty()) {
-            Toast.makeText(this, "Please enter text", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        
-        String text = fullText;
-        
-        // If already generating, cancel the current process and start fresh
-        if (isGenerating) {
-            cancelCurrentGeneration();
-        }
-        
-        // selectedVoice is already set by button click
-        isGenerating = true;
-        
-        // 기존 재생 중지 및 데이터 초기화
-        stopAudio();
-        clearAudioChunks();
-        audioChunks.clear();
-        chunkTexts.clear();
-        currentChunkIndex = 0;
-        
-        // Reset generation metrics
-        generationStartTime = System.currentTimeMillis();
-        totalTextLength = text.length();
-        totalAudioDuration = 0;
-        chunkProcessingTimes.clear();
-        chunkCPSList.clear();
-        chunkRTFList.clear();
-        totalChunkProcessingTime = 0;
-        updateLogConsole("", true); // Clear console
-        
-        // 문장-청크 매핑 초기화
-        sentenceToChunkMap.clear();
-        for (int i = 0; i < sentences.size(); i++) {
-            sentenceToChunkMap.add(-1); // 초기값: 매핑 없음
-        }
-        
-        // 전체 텍스트의 청크 리스트 사용 (절대 번호 기준)
-        // allChunks는 setupPages()에서 이미 생성되어 있음
-        if (allChunks.isEmpty()) {
-            allChunks = chunkText(fullText);
-        }
-        
-        // 현재 생성할 청크의 절대 시작 인덱스 (전체 텍스트 기준 0번부터 시작)
-        firstChunkAbsoluteIndex = 0;
-        
-        // 생성 시작 시점의 목소리 저장 (목소리 변경 감지용)
-        final String generationVoice = selectedVoice;
-        
-        currentGenerationTask = executorService.submit(() -> {
-            try {
-                // 전체 텍스트의 청크 리스트 사용 (절대 번호 기준)
-                List<String> chunks = allChunks;
-                mainHandler.post(() -> updateStatus("Generating " + chunks.size() + " segments..."));
-                
-                // 청크를 문장에 매핑 (절대 번호 사용)
-                mapChunksToSentencesWithAbsoluteIndex(chunks, 0, 0);
-                
-                if (chunks.isEmpty()) {
-                    throw new Exception("Chunk generation failed");
-                }
-                
-                // 첫 번째 청크 생성 및 즉시 재생
-                String firstChunk = chunks.get(0);
-                mainHandler.post(() -> {
-                    updateStatus("Generating segment " + (firstChunkAbsoluteIndex + 1) + "...");
-                    // 첫 번째 청크 생성 중일 때 gen 아이콘 표시
-                    playButton.setImageResource(R.drawable.ic_gen);
-                });
-                
-                // Check if cancelled before generating first chunk
-                if (Thread.currentThread().isInterrupted()) {
-                    android.util.Log.d("MainActivity", "Generation interrupted before first chunk");
-                    return;
-                }
-                
-                long firstChunkStartTime = System.currentTimeMillis();
-                byte[] firstAudioData = null;
-                try {
-                    firstAudioData = ttsEngine.generate(firstChunk, generationVoice);
-                } catch (Exception e) {
-                    if (Thread.currentThread().isInterrupted()) {
-                        return;
-                    }
-                    throw e;
-                }
-                
-                // Check again if cancelled after first chunk generation
-                if (Thread.currentThread().isInterrupted()) {
-                    android.util.Log.d("MainActivity", "Generation interrupted after first chunk generation");
-                    return;
-                }
-                
-                if (firstAudioData == null || firstAudioData.length == 0) {
-                    throw new Exception("First chunk generation failed");
-                }
-                
-                long firstChunkEndTime = System.currentTimeMillis();
-                double firstChunkProcessingTime = (firstChunkEndTime - firstChunkStartTime) / 1000.0;
-                chunkProcessingTimes.add(firstChunkProcessingTime);
-                totalChunkProcessingTime += firstChunkProcessingTime;
-                
-                // 절대 청크 번호 사용
-                int absoluteChunkIndex = firstChunkAbsoluteIndex;
-                File firstChunkFile = saveChunk(firstAudioData, absoluteChunkIndex, generationVoice);
-                audioChunks.add(firstChunkFile);
-                chunkTexts.add(firstChunk); // 청크 텍스트 저장
-                
-                // 첫 번째 청크 즉시 재생 시작 (오디오 길이 계산은 playFirstChunk 내부에서 수행)
-                mainHandler.post(() -> {
-                    if (!Thread.currentThread().isInterrupted()) {
-                        playFirstChunk(firstChunkFile, firstChunk, firstChunkProcessingTime);
-                        updateStatus("Playing segment " + (firstChunkAbsoluteIndex + 1) + "... (generating rest)");
-                    }
-                });
-                
-                // 나머지 청크들을 백그라운드에서 생성
-                for (int i = 1; i < chunks.size(); i++) {
-                    // Check if cancelled
-                    if (Thread.currentThread().isInterrupted()) {
-                        android.util.Log.d("MainActivity", "Generation interrupted at chunk " + i);
-                        return;
-                    }
-                    
-                    // 목소리가 변경되었는지 확인 (다른 목소리의 생성 작업 중단)
-                    if (!selectedVoice.equals(generationVoice)) {
-                        android.util.Log.d("MainActivity", "Voice changed from " + generationVoice + " to " + selectedVoice + ", stopping generation");
-                        return;
-                    }
-                    
-                    String chunk = chunks.get(i);
-                    final int chunkIndex = i;
-                    final int totalChunks = chunks.size();
-                    final int chunkAbsoluteIndex = firstChunkAbsoluteIndex + i;
-                    mainHandler.post(() -> updateStatus("Generating segment " + (chunkAbsoluteIndex + 1) + "..."));
-                    
-                    long chunkStartTime = System.currentTimeMillis();
-                    byte[] chunkAudioData = null;
-                    try {
-                        chunkAudioData = ttsEngine.generate(chunk, generationVoice);
-                    } catch (Exception e) {
-                        if (Thread.currentThread().isInterrupted()) {
-                            return;
-                        }
-                        throw e;
-                    }
-                    
-                    // Check again if cancelled after generation
-                    if (Thread.currentThread().isInterrupted()) {
-                        android.util.Log.d("MainActivity", "Generation interrupted after chunk " + i + " generation");
-                        return;
-                    }
-                    
-                    if (chunkAudioData != null && chunkAudioData.length > 0) {
-                        long chunkEndTime = System.currentTimeMillis();
-                        double chunkProcessingTime = (chunkEndTime - chunkStartTime) / 1000.0;
-                        chunkProcessingTimes.add(chunkProcessingTime);
-                        totalChunkProcessingTime += chunkProcessingTime;
-                        
-                        // 절대 청크 번호 사용 (이미 위에서 정의됨)
-                        File chunkFile = saveChunk(chunkAudioData, chunkAbsoluteIndex, generationVoice);
-                        audioChunks.add(chunkFile);
-                        chunkTexts.add(chunk); // 청크 텍스트 저장
-                        
-                        // Estimate audio duration from chunk size (rough estimate)
-                        // WAV file: 44 bytes header + audio data
-                        // For 16-bit mono at 24kHz: duration = (dataSize - 44) / (24000 * 2)
-                        long chunkSize = chunkFile.length();
-                        double estimatedDuration = (chunkSize > 44) ? (chunkSize - 44) / (24000.0 * 2.0) : 0;
-                        totalAudioDuration += estimatedDuration;
-                        
-                        // Calculate metrics for this chunk
-                        double chunkCPS = chunk.length() > 0 && chunkProcessingTime > 0 ? chunk.length() / chunkProcessingTime : 0;
-                        double chunkRTF = estimatedDuration > 0 ? chunkProcessingTime / estimatedDuration : 0;
-                        chunkCPSList.add(chunkCPS);
-                        chunkRTFList.add(chunkRTF);
-                        
-                        // Update log console
-                        updateLogConsoleMetrics();
-                        
-                        // 현재 재생 중인 청크가 마지막이면 다음 청크 재생
-                        mainHandler.post(() -> {
-                            if (mediaPlayer != null && !mediaPlayer.isPlaying() && 
-                                !isPaused && currentChunkIndex < audioChunks.size() - 1) {
-                                playNextChunk();
-                            }
-                        });
-                    }
-                }
-                
-                mainHandler.post(() -> {
-                    updateStatus("All segments generated");
-                    isGenerating = false;
-                    currentGenerationTask = null;
-                });
-            } catch (java.util.concurrent.CancellationException e) {
-                // Generation was cancelled, ignore
-                android.util.Log.d("MainActivity", "Generation cancelled");
-            } catch (Exception e) {
-                // Only show error if not cancelled
-                if (!Thread.currentThread().isInterrupted()) {
-                    mainHandler.post(() -> {
-                        String errorMsg = e.getMessage();
-                        if (errorMsg == null) {
-                            errorMsg = e.getClass().getSimpleName();
-                        }
-                        String fullErrorMsg = "Error: " + errorMsg;
-                        lastErrorMessage = fullErrorMsg + "\n\nFull error:\n" + getStackTrace(e);
-                        updateStatus(fullErrorMsg, true);
-                        Toast.makeText(MainActivity.this, 
-                            "An error occurred. Click copy button to see full details.", 
-                            Toast.LENGTH_LONG).show();
-                        isGenerating = false;
-                        currentGenerationTask = null;
-                    });
-                }
-            }
-        });
     }
     
     /**
@@ -739,11 +797,92 @@ public class MainActivity extends AppCompatActivity {
     }
     
     /**
+     * 백그라운드 생성 작업 취소
+     */
+    private void cancelBackgroundGeneration() {
+        if (backgroundGenerationTask != null && !backgroundGenerationTask.isDone()) {
+            backgroundGenerationTask.cancel(true);
+            android.util.Log.d("MainActivity", "Cancelling background generation");
+        }
+        backgroundGenerationQueue.clear();
+        backgroundGenerationTask = null;
+    }
+    
+    /**
      * Clear all audio chunk files (목소리별 청크는 유지하므로 파일 삭제하지 않음)
      */
     private void clearAudioChunks() {
         // 목소리별 이미 생성된 청크 오디오는 지울 필요 없음
         // 파일 삭제 로직 제거
+    }
+    
+    /**
+     * 오래된 오디오 캐시 파일 자동 정리
+     * 캐시 파일이 autoCleanAudioCacheLimit 개수를 넘으면 오래된 파일부터 삭제
+     */
+    private void cleanOldAudioCache() {
+        try {
+            File cacheDir = getCacheDir();
+            if (cacheDir == null || !cacheDir.exists()) {
+                return;
+            }
+            
+            File[] files = cacheDir.listFiles();
+            if (files == null) {
+                return;
+            }
+            
+            // tts_chunk_*.wav 파일만 필터링
+            List<File> audioCacheFiles = new ArrayList<>();
+            for (File file : files) {
+                if (file.isFile() && file.getName().startsWith("tts_chunk_") && file.getName().endsWith(".wav")) {
+                    audioCacheFiles.add(file);
+                }
+            }
+            
+            // 파일 개수가 제한을 넘으면 오래된 파일부터 삭제
+            if (audioCacheFiles.size() > autoCleanAudioCacheLimit) {
+                // 파일 수정 시간 기준으로 정렬 (오래된 파일이 앞에 오도록)
+                audioCacheFiles.sort((f1, f2) -> Long.compare(f1.lastModified(), f2.lastModified()));
+                
+                // 오래된 파일부터 삭제 (제한 개수만큼 남기고 나머지 삭제)
+                int filesToDelete = audioCacheFiles.size() - autoCleanAudioCacheLimit;
+                int deletedCount = 0;
+                for (int i = 0; i < filesToDelete; i++) {
+                    if (audioCacheFiles.get(i).delete()) {
+                        deletedCount++;
+                    }
+                }
+                android.util.Log.d("MainActivity", "Auto-cleaned " + deletedCount + " old audio cache files (limit: " + autoCleanAudioCacheLimit + ")");
+            }
+        } catch (Exception e) {
+            android.util.Log.e("MainActivity", "Error cleaning old audio cache: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * 모든 오디오 캐시 파일 삭제 (tts_chunk_*.wav)
+     */
+    private void clearAllAudioCache() {
+        try {
+            File cacheDir = getCacheDir();
+            if (cacheDir != null && cacheDir.exists()) {
+                File[] files = cacheDir.listFiles();
+                if (files != null) {
+                    int deletedCount = 0;
+                    for (File file : files) {
+                        if (file.isFile() && file.getName().startsWith("tts_chunk_") && file.getName().endsWith(".wav")) {
+                            if (file.delete()) {
+                                deletedCount++;
+                            }
+                        }
+                    }
+                    android.util.Log.d("MainActivity", "Cleared " + deletedCount + " audio cache files");
+                }
+            }
+        } catch (Exception e) {
+            android.util.Log.e("MainActivity", "Error clearing audio cache: " + e.getMessage());
+        }
     }
     
     /**
@@ -760,53 +899,99 @@ public class MainActivity extends AppCompatActivity {
     }
     
     /**
-     * Update metrics display (3-column format)
+     * 세그먼트 재생 시점에 CPS/RTF 표시
+     * @param absoluteChunkIndex 청크의 절대 인덱스
      */
-    private void updateLogConsoleMetrics() {
-        if (metricsText == null || chunkProcessingTimes.isEmpty()) return;
+    private void showChunkMetrics(int absoluteChunkIndex) {
+        Double cps = chunkCPSMap.get(absoluteChunkIndex);
+        Double rtf = chunkRTFMap.get(absoluteChunkIndex);
         
-        // 1단: Processing Time
-        double currentChunkTime = chunkProcessingTimes.get(chunkProcessingTimes.size() - 1);
-        String totalTimeStr = formatTimeLong(totalChunkProcessingTime);
-        String processingTimeStr = String.format("Proc. time: %.2fs / %s", currentChunkTime, totalTimeStr);
-        
-        // 2단: Characters per sec. (평균값)
-        double avgCPS = 0;
-        if (!chunkCPSList.isEmpty()) {
-            double sumCPS = 0;
-            for (Double cps : chunkCPSList) {
-                sumCPS += cps;
-            }
-            avgCPS = sumCPS / chunkCPSList.size();
+        if (cps == null || rtf == null) {
+            // 해당 청크의 메트릭이 없으면 표시하지 않음
+            return;
         }
-        String cpsStr = String.format("Chars./s: %.0f", avgCPS);
         
-        // 3단: RTF (평균값)
-        double avgRTF = 0;
-        if (!chunkRTFList.isEmpty()) {
-            double sumRTF = 0;
-            for (Double rtf : chunkRTFList) {
-                sumRTF += rtf;
-            }
-            avgRTF = sumRTF / chunkRTFList.size();
+        String cpsValue = String.format("%.0f", cps);
+        String rtfValue = String.format("%.3fx", rtf);
+        String logText = String.format("CPS %s\nRTF %s", cpsValue, rtfValue);
+        
+        // 미디어 플레이어 섹션에 표시
+        if (mediaMetricsText != null && mainHandler != null) {
+            // 기존 예약된 숨기기 작업 제거
+            mainHandler.removeCallbacksAndMessages(null);
+            
+            // SpannableString으로 레이블은 회색, 값은 검정으로 설정
+            SpannableString spannable = new SpannableString(logText);
+            
+            // "CPS" 레이블을 #999 색상으로 설정
+            int cpsLabelStart = 0;
+            int cpsLabelEnd = "CPS".length();
+            spannable.setSpan(new android.text.style.ForegroundColorSpan(0xFF999999), 
+                cpsLabelStart, cpsLabelEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            
+            // CPS값은 검정색 (기본 색상이므로 별도 설정 불필요)
+            // 하지만 명시적으로 검정색으로 설정
+            int cpsValueStart = "CPS ".length();
+            int cpsValueEnd = cpsValueStart + cpsValue.length();
+            spannable.setSpan(new android.text.style.ForegroundColorSpan(0xFF000000), 
+                cpsValueStart, cpsValueEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            
+            // "RTF" 레이블을 #999 색상으로 설정
+            int rtfLabelStart = logText.indexOf("RTF");
+            int rtfLabelEnd = rtfLabelStart + "RTF".length();
+            spannable.setSpan(new android.text.style.ForegroundColorSpan(0xFF999999), 
+                rtfLabelStart, rtfLabelEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            
+            // RTF값은 검정색으로 설정
+            int rtfValueStart = rtfLabelEnd + 1; // "RTF " 다음
+            int rtfValueEnd = rtfValueStart + rtfValue.length();
+            spannable.setSpan(new android.text.style.ForegroundColorSpan(0xFF000000), 
+                rtfValueStart, rtfValueEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            
+            // 텍스트 표시
+            mediaMetricsText.setText(spannable);
+            
+            // 1초 후 텍스트 숨기기
+            mainHandler.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    if (mediaMetricsText != null) {
+                        mediaMetricsText.setText("");
+                    }
+                }
+            }, 1500); // 1.5초 후 실행
         }
-        String rtfStr = String.format("RTF: %.3fx", avgRTF);
-        
-        // 3단 구조로 표시 (각 1/3씩)
-        String logText = String.format("%s | %s | %s", processingTimeStr, cpsStr, rtfStr);
-        metricsText.setText(logText);
     }
     
     /**
-     * 시간 포맷팅 (초 -> MM:SS.SS)
+     * 세그먼트 생성 시 Processing time, CPS, RTF 저장
+     * @param absoluteChunkIndex 청크의 절대 인덱스
+     * @param chunkText 청크 텍스트
+     * @param processingTime 생성 시간 (초)
+     * @param audioDuration 오디오 재생 시간 (초)
      */
-    private String formatTimeLong(double seconds) {
-        int totalSeconds = (int) seconds;
-        int minutes = totalSeconds / 60;
-        int secs = totalSeconds % 60;
-        // 소수점 두 자리 (밀리초)
-        int centiseconds = (int) ((seconds - totalSeconds) * 100);
-        return String.format("%02d:%02d.%02d", minutes, secs, centiseconds);
+    private void saveChunkMetrics(int absoluteChunkIndex, String chunkText, double processingTime, double audioDuration) {
+        if (chunkText == null || chunkText.isEmpty() || processingTime <= 0) {
+            return;
+        }
+        
+        // Processing time 저장
+        chunkProcessingTimeMap.put(absoluteChunkIndex, processingTime);
+        
+        // CPS 계산: 문자 수 / 처리 시간
+        double cps = chunkText.length() / processingTime;
+        
+        // RTF 계산: 처리 시간 / 오디오 재생 시간
+        double rtf = audioDuration > 0 ? processingTime / audioDuration : 0;
+        
+        // Map에 저장
+        chunkCPSMap.put(absoluteChunkIndex, cps);
+        chunkRTFMap.put(absoluteChunkIndex, rtf);
+        
+        // 레거시 리스트에도 추가 (필요한 경우)
+        chunkProcessingTimes.add(processingTime);
+        chunkCPSList.add(cps);
+        chunkRTFList.add(rtf);
     }
     
     /**
@@ -888,30 +1073,54 @@ public class MainActivity extends AppCompatActivity {
             sentenceToChunkMap.add(-1);
         }
         
+        // fullText에서 각 문장의 위치를 미리 계산
+        int fullTextPos = 0;
+        for (int i = 0; i < startSentenceIndex && i < sentences.size(); i++) {
+            String prevSentence = sentences.get(i);
+            int pos = fullText.indexOf(prevSentence, fullTextPos);
+            if (pos >= 0) {
+                fullTextPos = pos + prevSentence.length();
+            }
+        }
+        
         // 각 청크를 순서대로 처리
         int sentenceIndex = startSentenceIndex;
+        int chunkStartInFullText = fullTextPos;
         for (int relativeChunkIndex = 0; relativeChunkIndex < chunks.size() && sentenceIndex < sentences.size(); relativeChunkIndex++) {
             String chunk = chunks.get(relativeChunkIndex).trim();
-            String remainingChunk = chunk;
+            
+            // fullText에서 이 청크의 위치 찾기
+            int chunkPos = fullText.indexOf(chunk, chunkStartInFullText);
+            if (chunkPos < 0) {
+                // 정확히 일치하지 않으면 부분 매칭 시도
+                String chunkPart = chunk.length() > 50 ? chunk.substring(0, 50) : chunk;
+                chunkPos = fullText.indexOf(chunkPart, chunkStartInFullText);
+            }
+            if (chunkPos < 0) {
+                // 청크를 찾을 수 없으면 다음 청크로
+                chunkStartInFullText += chunk.length();
+                continue;
+            }
+            
+            int chunkEndInFullText = chunkPos + chunk.length();
             
             // 절대 청크 번호 계산
             int absoluteChunkIndex = startChunkAbsoluteIndex + relativeChunkIndex;
             
             // 이 청크에 포함된 연속된 문장들을 찾아 매핑
-            while (sentenceIndex < sentences.size() && remainingChunk.length() > 0) {
+            while (sentenceIndex < sentences.size()) {
                 String sentence = sentences.get(sentenceIndex).trim();
                 
-                // 청크의 현재 위치에서 이 문장을 찾기
-                int pos = remainingChunk.indexOf(sentence);
-                if (pos >= 0) {
-                    // 이 문장을 절대 청크 번호에 매핑
+                // fullText에서 이 문장의 위치 찾기 (chunkStartInFullText 이후부터)
+                int sentencePos = fullText.indexOf(sentence, chunkStartInFullText);
+                if (sentencePos >= 0 && sentencePos < chunkEndInFullText) {
+                    // 이 문장이 이 청크 내에 있으면 매핑
                     sentenceToChunkMap.set(sentenceIndex, absoluteChunkIndex);
                     sentenceIndex++;
-                    
-                    // 청크의 나머지 부분 업데이트 (이 문장 이후 부분)
-                    remainingChunk = remainingChunk.substring(pos + sentence.length()).trim();
+                    chunkStartInFullText = sentencePos + sentence.length();
                 } else {
                     // 이 청크에 더 이상 문장이 없으면 다음 청크로
+                    chunkStartInFullText = chunkEndInFullText;
                     break;
                 }
             }
@@ -921,20 +1130,30 @@ public class MainActivity extends AppCompatActivity {
     /**
      * 청크를 파일로 저장 (보이스별로 구분)
      */
-    private File saveChunk(byte[] audioData, int index, String voice) throws IOException {
-        // 보이스별 파일명: tts_chunk_{voice}_{index}.wav
-        File chunkFile = new File(getCacheDir(), "tts_chunk_" + voice + "_" + index + ".wav");
+    private File saveChunk(byte[] audioData, int index, String voice, String speed) throws IOException {
+        // 보이스별, 속도별 파일명: tts_chunk_{voice}_{speed}_{index}.wav
+        String speedStr = speed.replace(".", "p").replace("x", "");
+        File chunkFile = new File(getCacheDir(), "tts_chunk_" + voice + "_" + speedStr + "_" + index + ".wav");
         FileOutputStream fos = new FileOutputStream(chunkFile);
         fos.write(audioData);
         fos.close();
+        
+        // keepAudioCache가 true이고 autoCleanAudioCache가 true일 때만 오래된 캐시 파일 정리
+        // keepAudioCache가 false면 앱 실행 시 캐시를 삭제하므로 자동 제거 로직 불필요
+        if (keepAudioCache && autoCleanAudioCache) {
+            cleanOldAudioCache();
+        }
+        
         return chunkFile;
     }
     
     /**
      * 보이스별 청크 파일 찾기
      */
-    private File findChunkFile(String voice, int absoluteChunkIndex) {
-        File chunkFile = new File(getCacheDir(), "tts_chunk_" + voice + "_" + absoluteChunkIndex + ".wav");
+    private File findChunkFile(String voice, String speed, int absoluteChunkIndex) {
+        // 보이스별, 속도별 파일명: tts_chunk_{voice}_{speed}_{index}.wav
+        String speedStr = speed.replace(".", "p").replace("x", "");
+        File chunkFile = new File(getCacheDir(), "tts_chunk_" + voice + "_" + speedStr + "_" + absoluteChunkIndex + ".wav");
         if (chunkFile.exists()) {
             return chunkFile;
         }
@@ -982,7 +1201,6 @@ public class MainActivity extends AppCompatActivity {
             currentChunkPlaybackProgress = 0.0;
             
             // 오디오 길이 계산 및 메트릭스 업데이트
-            if (chunkText != null && processingTime > 0) {
                 double firstChunkAudioDuration = 0;
                 int duration = mediaPlayer.getDuration();
                 if (duration > 0) {
@@ -994,20 +1212,53 @@ public class MainActivity extends AppCompatActivity {
                     totalAudioDuration += firstChunkAudioDuration;
                 }
                 
-                double firstChunkCPS = chunkText.length() > 0 && processingTime > 0 ? chunkText.length() / processingTime : 0;
-                double firstChunkRTF = firstChunkAudioDuration > 0 ? processingTime / firstChunkAudioDuration : 0;
-                chunkCPSList.add(firstChunkCPS);
-                chunkRTFList.add(firstChunkRTF);
-                
-                // Update log console
-                updateLogConsoleMetrics();
+            // CPS/RTF 저장 또는 업데이트
+            if (chunkText != null) {
+                if (processingTime > 0) {
+                    // 새로 생성한 경우: CPS/RTF 모두 계산하여 저장
+                    saveChunkMetrics(firstChunkAbsoluteIndex, chunkText, processingTime, firstChunkAudioDuration);
+                }
+                // 기존 파일인 경우: Map에 이미 저장된 값이 있으면 사용 (초기화하지 않았으므로 유지됨)
             }
+            
+            // 재생 시작 시점에 해당 청크의 CPS/RTF 표시
+            showChunkMetrics(firstChunkAbsoluteIndex);
             
             mediaPlayer.setOnCompletionListener(mp -> {
                 if (!isPaused && currentChunkIndex < audioChunks.size() - 1) {
                     playNextChunk();
                 } else if (currentChunkIndex >= audioChunks.size() - 1) {
-                    // 모든 청크 재생 완료
+                    // 현재 문장의 모든 청크 재생 완료
+                    // 다음 문장 찾기
+                    int currentAbsoluteChunkIndex = firstChunkAbsoluteIndex + currentChunkIndex;
+                    int currentSentenceIndex = -1;
+                    
+                    // 현재 청크에 해당하는 문장 찾기
+                    for (int i = 0; i < sentenceToChunkMap.size(); i++) {
+                        if (sentenceToChunkMap.get(i) == currentAbsoluteChunkIndex) {
+                            currentSentenceIndex = i;
+                            break;
+                        }
+                    }
+                    
+                    // 문장을 찾지 못하면 청크 텍스트로 문장 찾기
+                    if (currentSentenceIndex < 0 && currentAbsoluteChunkIndex >= 0 && currentAbsoluteChunkIndex < allChunks.size()) {
+                        String currentChunkText = allChunks.get(currentAbsoluteChunkIndex);
+                        for (int i = 0; i < sentences.size(); i++) {
+                            if (sentences.get(i).contains(currentChunkText) || currentChunkText.contains(sentences.get(i))) {
+                                currentSentenceIndex = i;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    // 다음 문장이 있으면 자동으로 생성 및 재생
+                    if (currentSentenceIndex >= 0 && currentSentenceIndex < sentences.size() - 1) {
+                        int nextSentenceIndex = currentSentenceIndex + 1;
+                        android.util.Log.d("MainActivity", "Current sentence " + currentSentenceIndex + " completed, generating next sentence " + nextSentenceIndex);
+                        generateAudio(String.valueOf(nextSentenceIndex), null, null);
+                    } else {
+                        // 모든 문장 재생 완료
                     updateStatus("Playback complete");
                     playButton.setEnabled(true);
                     playButton.setImageResource(R.drawable.ic_play);
@@ -1017,6 +1268,7 @@ public class MainActivity extends AppCompatActivity {
                     isPaused = false;
                     // 하이라이트 제거
                     displayCurrentPage();
+                    }
                 }
             });
             
@@ -1036,6 +1288,13 @@ public class MainActivity extends AppCompatActivity {
             // 청크 하이라이트 및 페이지 업데이트
             updateChunkHighlight();
             checkAndUpdatePageForChunk();
+            
+            // n페이지의 첫 번째 세그먼트 재생 시 자동 페이지 전환
+            checkAndAutoNavigateToNextChunkPage(firstChunkAbsoluteIndex);
+            
+            // 재생 시점에 백그라운드 생성 시작 (n+1, n+2, n+3)
+            int absoluteChunkIndex = firstChunkAbsoluteIndex + currentChunkIndex;
+            startBackgroundGeneration(absoluteChunkIndex, selectedVoice, selectedSpeed);
             
             android.util.Log.d("MainActivity", "First chunk playback started");
             
@@ -1074,7 +1333,37 @@ public class MainActivity extends AppCompatActivity {
                 if (!isPaused && currentChunkIndex < audioChunks.size() - 1) {
                     playNextChunk();
                 } else if (currentChunkIndex >= audioChunks.size() - 1) {
-                    // 모든 청크 재생 완료
+                    // 현재 문장의 모든 청크 재생 완료
+                    // 다음 문장 찾기
+                    int currentAbsoluteChunkIndex = firstChunkAbsoluteIndex + currentChunkIndex;
+                    int currentSentenceIndex = -1;
+                    
+                    // 현재 청크에 해당하는 문장 찾기
+                    for (int i = 0; i < sentenceToChunkMap.size(); i++) {
+                        if (sentenceToChunkMap.get(i) == currentAbsoluteChunkIndex) {
+                            currentSentenceIndex = i;
+                            break;
+                        }
+                    }
+                    
+                    // 문장을 찾지 못하면 청크 텍스트로 문장 찾기
+                    if (currentSentenceIndex < 0 && currentAbsoluteChunkIndex >= 0 && currentAbsoluteChunkIndex < allChunks.size()) {
+                        String currentChunkText = allChunks.get(currentAbsoluteChunkIndex);
+                        for (int i = 0; i < sentences.size(); i++) {
+                            if (sentences.get(i).contains(currentChunkText) || currentChunkText.contains(sentences.get(i))) {
+                                currentSentenceIndex = i;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    // 다음 문장이 있으면 자동으로 생성 및 재생
+                    if (currentSentenceIndex >= 0 && currentSentenceIndex < sentences.size() - 1) {
+                        int nextSentenceIndex = currentSentenceIndex + 1;
+                        android.util.Log.d("MainActivity", "Current sentence " + currentSentenceIndex + " completed, generating next sentence " + nextSentenceIndex);
+                        generateAudio(String.valueOf(nextSentenceIndex), null, null);
+                    } else {
+                        // 모든 문장 재생 완료
                     updateStatus("Playback complete");
                     playButton.setEnabled(true);
                     playButton.setImageResource(R.drawable.ic_play);
@@ -1084,6 +1373,7 @@ public class MainActivity extends AppCompatActivity {
                     isPaused = false;
                     // 하이라이트 제거
                     displayCurrentPage();
+                    }
                 }
             });
             
@@ -1100,12 +1390,18 @@ public class MainActivity extends AppCompatActivity {
             int absoluteChunkIndex = firstChunkAbsoluteIndex + currentChunkIndex;
             updateStatus("Playing segment " + (absoluteChunkIndex + 1));
             
+            // 재생 시작 시점에 해당 청크의 CPS/RTF 표시
+            showChunkMetrics(absoluteChunkIndex);
+            
             // 청크 하이라이트 및 페이지 업데이트
             updateChunkHighlight();
             checkAndUpdatePageForChunk();
             
-            // 다음 청크가 다음 페이지에 있고, 현재 페이지가 재생 중인 페이지라면 자동 전환
+            // n페이지의 첫 번째 세그먼트 재생 시 자동 페이지 전환
             checkAndAutoNavigateToNextChunkPage(absoluteChunkIndex);
+            
+            // n+1 재생 시점에 n+3을 백그라운드 생성에 추가
+            addNextToBackgroundQueue(absoluteChunkIndex, selectedVoice, selectedSpeed);
             
             // Update total audio duration
             if (mediaPlayer.getDuration() > 0) {
@@ -1157,17 +1453,20 @@ public class MainActivity extends AppCompatActivity {
                         // 전체 재생 시간: 모든 청크의 총합
                         int totalDuration = (int)(totalAudioDuration * 1000);
                         
-                        if (timeDisplay != null) {
-                            timeDisplay.setText(formatTime(currentChunkPosition) + " / " + formatTime(totalDuration));
-                        }
+                        // 재생시간 표시 숨김
+                        // if (timeDisplay != null) {
+                        //     timeDisplay.setText(formatTime(currentChunkPosition) + " / " + formatTime(totalDuration));
+                        // }
                     } catch (Exception e) {
                         // 무시
                     }
-                } else if (timeDisplay != null) {
-                    // MediaPlayer가 없으면 00:00 / 전체 시간 표시
-                    int totalDuration = (int)(totalAudioDuration * 1000);
-                    timeDisplay.setText("00:00 / " + formatTime(totalDuration));
                 }
+                // 재생시간 표시 숨김
+                // else if (timeDisplay != null) {
+                //     // MediaPlayer가 없으면 00:00 / 전체 시간 표시
+                //     int totalDuration = (int)(totalAudioDuration * 1000);
+                //     timeDisplay.setText("00:00 / " + formatTime(totalDuration));
+                // }
                 
                 progressHandler.postDelayed(this, 100); // 100ms마다 업데이트
             }
@@ -1224,21 +1523,53 @@ public class MainActivity extends AppCompatActivity {
     }
     
     /**
-     * 다음 청크가 다음 페이지에 있을 때 자동 페이지 전환
-     * 현재 재생 중인 페이지를 보고 있을 때만 작동
+     * 현재 재생 중인 세그먼트가 있는 페이지로 이동
+     */
+    private void navigateToCurrentPlayingChunkPage() {
+        if (currentPlayingChunkAbsoluteIndex < 0 || pages.isEmpty() || allChunks.isEmpty()) {
+            return;
+        }
+        
+        // 현재 재생 중인 청크 텍스트 찾기
+        String currentChunkText = null;
+        if (currentChunkIndex >= 0 && currentChunkIndex < chunkTexts.size()) {
+            currentChunkText = chunkTexts.get(currentChunkIndex);
+        } else if (currentPlayingChunkAbsoluteIndex >= 0 && currentPlayingChunkAbsoluteIndex < allChunks.size()) {
+            currentChunkText = allChunks.get(currentPlayingChunkAbsoluteIndex);
+        }
+        
+        if (currentChunkText == null || currentChunkText.isEmpty()) {
+            return;
+        }
+        
+        // 청크가 속한 페이지 정보 찾기
+        ChunkPageInfo chunkInfo = findChunkPages(currentChunkText, currentPlayingChunkAbsoluteIndex);
+        
+        if (chunkInfo.startPage < 0) {
+            return;
+        }
+        
+        // 현재 페이지가 청크가 있는 페이지가 아니면 시작 페이지로 이동
+        if (currentPageIndex != chunkInfo.startPage && currentPageIndex != chunkInfo.endPage) {
+            currentPageIndex = chunkInfo.startPage;
+            displayCurrentPage();
+            updatePageIndicator();
+        }
+    }
+    
+    /**
+     * n페이지의 첫 번째 세그먼트 재생 시 자동 페이지 전환
+     * n페이지의 첫 번째 세그먼트 재생할 때, 지금 n-1페이지를 보고 있다면 강제로 n페이지로 이동
+     * 읽기 시작할 때 한 번만 적용됨
      * 
-     * 예: 3번 페이지를 보고 있을 때, 3번 페이지의 마지막 청크 재생 후
-     *     다음 청크가 4번 페이지에 있다면 4번 페이지로 자동 이동
-     *     하지만 2번 페이지나 5번 페이지에 있다면 자동 이동하지 않음
-     * 
-     * @param currentChunkAbsoluteIndex 현재 재생 중인 청크의 절대 인덱스 (playNextChunk에서 다음 청크로 넘어간 후의 인덱스)
+     * @param currentChunkAbsoluteIndex 현재 재생 중인 청크의 절대 인덱스
      */
     private void checkAndAutoNavigateToNextChunkPage(int currentChunkAbsoluteIndex) {
         if (currentChunkAbsoluteIndex < 0 || pages.isEmpty() || allChunks.isEmpty()) {
             return;
         }
         
-        // 현재 재생 중인 청크(다음 청크로 넘어간 후의 청크)의 페이지 정보 찾기
+        // 현재 재생 중인 청크의 페이지 정보 찾기
         String currentChunkText = null;
         if (currentChunkIndex >= 0 && currentChunkIndex < chunkTexts.size()) {
             currentChunkText = chunkTexts.get(currentChunkIndex);
@@ -1255,36 +1586,43 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         
-        // 이전 청크(방금 재생이 끝난 청크)의 페이지 정보 찾기
-        int previousChunkAbsoluteIndex = currentChunkAbsoluteIndex - 1;
-        if (previousChunkAbsoluteIndex < 0 || previousChunkAbsoluteIndex >= allChunks.size()) {
-            return; // 이전 청크가 없음
+        int chunkPage = currentChunkInfo.startPage;
+        
+        // 현재 청크가 n페이지의 첫 번째 세그먼트인지 확인
+        // n페이지에 있는 다른 청크들 중에서 현재 청크보다 이전 청크가 없는지 확인
+        boolean isFirstChunkOnPage = true;
+        for (int i = 0; i < currentChunkAbsoluteIndex; i++) {
+            if (i < allChunks.size()) {
+                String otherChunkText = allChunks.get(i);
+                if (otherChunkText != null && !otherChunkText.isEmpty()) {
+                    ChunkPageInfo otherChunkInfo = findChunkPages(otherChunkText, i);
+                    if (otherChunkInfo.startPage == chunkPage) {
+                        // n페이지에 더 이전 청크가 있음
+                        isFirstChunkOnPage = false;
+                        break;
+                    }
+                }
+            }
         }
         
-        String previousChunkText = allChunks.get(previousChunkAbsoluteIndex);
-        if (previousChunkText == null || previousChunkText.isEmpty()) {
-            return;
-        }
+        // 현재 보고 있는 페이지가 n-1인지 확인
+        boolean isViewingPreviousPage = (currentPageIndex == chunkPage - 1);
         
-        ChunkPageInfo previousChunkInfo = findChunkPages(previousChunkText, previousChunkAbsoluteIndex);
-        if (previousChunkInfo.startPage < 0) {
-            return;
-        }
+        android.util.Log.d("MainActivity", "checkAndAutoNavigateToNextChunkPage: " +
+            "chunk=" + currentChunkAbsoluteIndex + ", " +
+            "chunkPage=" + chunkPage + ", " +
+            "currentViewingPage=" + currentPageIndex + ", " +
+            "isFirstChunkOnPage=" + isFirstChunkOnPage + ", " +
+            "isViewingPreviousPage=" + isViewingPreviousPage);
         
-        // 현재 청크의 시작 페이지가 이전 청크의 시작 페이지 + 1인지 확인 (다음 페이지)
-        boolean isNextPage = (currentChunkInfo.startPage == previousChunkInfo.startPage + 1);
-        
-        // 현재 보고 있는 페이지가 이전 청크의 시작 페이지와 같은지 확인
-        // (이전 청크를 재생 중이었던 페이지를 보고 있을 때만 자동 전환)
-        boolean isViewingPreviousChunkPage = (currentPageIndex == previousChunkInfo.startPage);
-        
-        // 조건이 맞으면 현재 청크의 시작 페이지로 자동 전환
-        if (isNextPage && isViewingPreviousChunkPage) {
-            currentPageIndex = currentChunkInfo.startPage;
+        // 조건이 맞으면 n페이지로 자동 전환
+        // 재생 시작 시점에만 호출되므로 중복 체크 불필요
+        if (isFirstChunkOnPage && isViewingPreviousPage && chunkPage >= 0 && chunkPage < pages.size()) {
+            currentPageIndex = chunkPage;
             displayCurrentPage();
             updatePageIndicator();
-            android.util.Log.d("MainActivity", "Auto-navigated from page " + previousChunkInfo.startPage + 
-                " to page " + currentChunkInfo.startPage + " for chunk " + (currentChunkAbsoluteIndex + 1));
+            android.util.Log.d("MainActivity", "Auto-navigated from page " + (chunkPage - 1) + 
+                " to page " + chunkPage + " for first chunk " + currentChunkAbsoluteIndex + " on page " + chunkPage);
         }
     }
     
@@ -1305,78 +1643,6 @@ public class MainActivity extends AppCompatActivity {
         if (mediaPlayer != null && mediaPlayer.getDuration() > 0) {
             mediaPlayer.seekTo(progress);
         }
-    }
-    
-    private void generateAudioOld() {
-        String text = fullText;
-        if (text.isEmpty()) {
-            Toast.makeText(this, "Please enter text", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        
-        // selectedVoice is already set by button click
-        generateButton.setEnabled(false);
-        updateStatus("Generating audio...");
-        
-        executorService.execute(() -> {
-            try {
-                byte[] audioData = ttsEngine.generate(text, selectedVoice);
-                
-                mainHandler.post(() -> {
-                    if (audioData != null && audioData.length > 0) {
-                        saveAndPlayAudio(audioData);
-                        updateStatus("Audio generation complete");
-                    } else {
-                        updateStatus("Audio generation failed");
-                        generateButton.setEnabled(true);
-                    }
-                });
-            } catch (IllegalStateException e) {
-                // 모델 파일 없음 - 사용자 친화적 메시지
-                mainHandler.post(() -> {
-                    String errorMsg = e.getMessage();
-                    if (errorMsg == null) {
-                        errorMsg = "TTS model files required";
-                    }
-                    lastErrorMessage = "Error: " + errorMsg + "\n\nFull error:\n" + getStackTrace(e);
-                    updateStatus(errorMsg, true);
-                    Toast.makeText(MainActivity.this, 
-                        "Please download Supertonic model files.\n" +
-                        "Use the model download feature in the app.", 
-                        Toast.LENGTH_LONG).show();
-                    generateButton.setEnabled(true);
-                });
-            } catch (UnsupportedOperationException e) {
-                // 더미 구현 - 사용자 친화적 메시지
-                mainHandler.post(() -> {
-                    String errorMsg = e.getMessage();
-                    if (errorMsg == null) {
-                        errorMsg = "TTS feature implementation required";
-                    }
-                    lastErrorMessage = "Error: " + errorMsg + "\n\nFull error:\n" + getStackTrace(e);
-                    updateStatus(errorMsg, true);
-                    Toast.makeText(MainActivity.this, 
-                        "Supertonic Java implementation required.\n" +
-                        "See: https://github.com/supertone-inc/supertonic/tree/main/java", 
-                        Toast.LENGTH_LONG).show();
-                    generateButton.setEnabled(true);
-                });
-            } catch (Exception e) {
-                mainHandler.post(() -> {
-                    String errorMsg = e.getMessage();
-                    if (errorMsg == null) {
-                        errorMsg = e.getClass().getSimpleName();
-                    }
-                    String fullErrorMsg = "Error: " + errorMsg;
-                    lastErrorMessage = fullErrorMsg + "\n\nFull error:\n" + getStackTrace(e);
-                    updateStatus(fullErrorMsg, true);
-                    Toast.makeText(MainActivity.this, 
-                        "An error occurred. Click copy button to see full details.", 
-                        Toast.LENGTH_LONG).show();
-                    generateButton.setEnabled(true);
-                });
-            }
-        });
     }
     
     private void saveAndPlayAudio(byte[] audioData) {
@@ -1479,7 +1745,9 @@ public class MainActivity extends AppCompatActivity {
     private void updateStatus(String status, boolean isError) {
         // '...' 제거
         String cleanedStatus = status.replace("...", "");
+        if (statusText != null) {
         statusText.setText(cleanedStatus);
+        }
         if (isError) {
             copyErrorButton.setVisibility(View.VISIBLE);
         } else {
@@ -1551,8 +1819,28 @@ public class MainActivity extends AppCompatActivity {
                 continue;
             }
             
+            // 쌍따옴표로 둘러싸인 부분을 먼저 보호
+            java.util.Map<String, String> quoteMap = new java.util.HashMap<>();
+            String quoteProtectedLine = trimmedLine;
+            int quoteMarkerIndex = 0;
+            
+            // 유니코드 쌍따옴표 패턴: 열림 " (U+201C), 닫힘 " (U+201D)
+            Pattern quotePattern = Pattern.compile("\u201C[^\u201D]*\u201D");
+            java.util.regex.Matcher quoteMatcher = quotePattern.matcher(trimmedLine);
+            StringBuffer quoteSb = new StringBuffer();
+            
+            while (quoteMatcher.find()) {
+                String quotedText = quoteMatcher.group();
+                String marker = "QUOTE_MARKER_" + quoteMarkerIndex;
+                quoteMap.put(marker, quotedText);
+                quoteMatcher.appendReplacement(quoteSb, marker);
+                quoteMarkerIndex++;
+            }
+            quoteMatcher.appendTail(quoteSb);
+            quoteProtectedLine = quoteSb.toString();
+            
             // 약어 뒤의 마침표를 임시로 치환하여 보호
-            String protectedLine = trimmedLine;
+            String protectedLine = quoteProtectedLine;
             int markerIndex = 0;
             java.util.regex.Matcher abbrevMatcher = Pattern.compile(abbrevRegex).matcher(protectedLine);
             StringBuffer sb = new StringBuffer();
@@ -1566,7 +1854,7 @@ public class MainActivity extends AppCompatActivity {
             
             // 약어 마커와 원래 약어 매핑 저장
             java.util.Map<String, String> markerMap = new java.util.HashMap<>();
-            abbrevMatcher = Pattern.compile(abbrevRegex).matcher(trimmedLine);
+            abbrevMatcher = Pattern.compile(abbrevRegex).matcher(quoteProtectedLine);
             markerIndex = 0;
             while (abbrevMatcher.find()) {
                 String abbrev = abbrevMatcher.group();
@@ -1574,13 +1862,64 @@ public class MainActivity extends AppCompatActivity {
                 markerIndex++;
             }
             
-            // 문장 끝 구분자로 분할
-            String[] tempSentences = protectedLine.split("(?<=\\.{2,10})\\s+|(?<=[.!?])(?!\\.)\\s+");
+            // 쌍따옴표 마커 위치 찾기
+            Pattern quoteMarkerPattern = Pattern.compile("QUOTE_MARKER_\\d+");
+            java.util.regex.Matcher quoteMarkerMatcher = quoteMarkerPattern.matcher(protectedLine);
+            java.util.List<int[]> quoteMarkerRanges = new ArrayList<>();
+            while (quoteMarkerMatcher.find()) {
+                quoteMarkerRanges.add(new int[]{quoteMarkerMatcher.start(), quoteMarkerMatcher.end()});
+            }
             
-            for (String sentence : tempSentences) {
+            // 문장 구분자로 분할하되, 쌍따옴표 마커 내부는 분할하지 않음
+            List<String> tempSentencesList = new ArrayList<>();
+            int lastSplitPos = 0;
+            
+            // 문장 구분자 패턴
+            Pattern sentenceEndPattern = Pattern.compile("(?<=\\.{2,10})\\s+|(?<=[.!?])(?!\\.)\\s+");
+            java.util.regex.Matcher sentenceEndMatcher = sentenceEndPattern.matcher(protectedLine);
+            
+            while (sentenceEndMatcher.find()) {
+                int matchStart = sentenceEndMatcher.start();
+                int matchEnd = sentenceEndMatcher.end();
+                
+                // 이 위치가 쌍따옴표 마커 내부에 있는지 확인
+                boolean insideQuoteMarker = false;
+                for (int[] range : quoteMarkerRanges) {
+                    if (matchStart >= range[0] && matchStart < range[1]) {
+                        insideQuoteMarker = true;
+                        break;
+                    }
+                }
+                
+                if (!insideQuoteMarker) {
+                    // 쌍따옴표 마커 외부에서만 분할
+                    String sentence = protectedLine.substring(lastSplitPos, matchStart).trim();
+                    if (!sentence.isEmpty()) {
+                        tempSentencesList.add(sentence);
+                    }
+                    lastSplitPos = matchEnd;
+                }
+            }
+            
+            // 마지막 부분 추가
+            String lastSentence = protectedLine.substring(lastSplitPos).trim();
+            if (!lastSentence.isEmpty()) {
+                tempSentencesList.add(lastSentence);
+            }
+            
+            // 분할된 문장이 없으면 전체를 하나의 문장으로 처리
+            if (tempSentencesList.isEmpty()) {
+                tempSentencesList.add(protectedLine.trim());
+            }
+            
+            for (String sentence : tempSentencesList) {
                 // 임시 마커를 원래 약어로 복원
                 sentence = sentence.trim();
                 for (java.util.Map.Entry<String, String> entry : markerMap.entrySet()) {
+                    sentence = sentence.replace(entry.getKey(), entry.getValue());
+                }
+                // 쌍따옴표 마커를 원래 쌍따옴표로 복원
+                for (java.util.Map.Entry<String, String> entry : quoteMap.entrySet()) {
                     sentence = sentence.replace(entry.getKey(), entry.getValue());
                 }
                 
@@ -1782,6 +2121,64 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
             
+            // 최소 17줄 보장: 페이지가 17줄보다 작게 잘리면 다음 페이지 내용을 가져와서 17줄까지 채우기
+            pageLayout = new StaticLayout(
+                pageText,
+                textPaintForLayout,
+                (int) pageWidth,
+                Layout.Alignment.ALIGN_NORMAL,
+                lineSpacingMultiplier,
+                lineSpacingExtra,
+                false
+            );
+            pageLineCount = pageLayout.getLineCount();
+            int minLinesPerPage = 17; // 최소 17줄 보장
+            
+            if (pageLineCount < minLinesPerPage && pageEndLine < totalLines - 1) {
+                // 17줄보다 적으면 다음 줄들을 추가하여 최소 17줄까지 채우기
+                int targetLineEnd = Math.min(currentLine + minLinesPerPage - 1, totalLines - 1);
+                int targetTextEnd = fullLayout.getLineEnd(targetLineEnd);
+                String targetPageText = fullText.substring(textStart, targetTextEnd);
+                
+                StaticLayout targetPageLayout = new StaticLayout(
+                    targetPageText,
+                    textPaintForLayout,
+                    (int) pageWidth,
+                    Layout.Alignment.ALIGN_NORMAL,
+                    lineSpacingMultiplier,
+                    lineSpacingExtra,
+                    false
+                );
+                
+                int targetLineCount = targetPageLayout.getLineCount();
+                if (targetLineCount >= minLinesPerPage || targetLineEnd >= totalLines - 1) {
+                    // 17줄 이상이 되거나 마지막 페이지인 경우
+                    pageEndLine = targetLineEnd;
+                    textEnd = targetTextEnd;
+                    pageText = targetPageText;
+                } else {
+                    // 17줄을 채우기 위해 더 많은 줄 추가 시도
+                    while (targetLineEnd < totalLines - 1 && targetLineCount < minLinesPerPage) {
+                        targetLineEnd = Math.min(targetLineEnd + 1, totalLines - 1);
+                        targetTextEnd = fullLayout.getLineEnd(targetLineEnd);
+                        targetPageText = fullText.substring(textStart, targetTextEnd);
+                        targetPageLayout = new StaticLayout(
+                            targetPageText,
+                            textPaintForLayout,
+                            (int) pageWidth,
+                            Layout.Alignment.ALIGN_NORMAL,
+                            lineSpacingMultiplier,
+                            lineSpacingExtra,
+                            false
+                        );
+                        targetLineCount = targetPageLayout.getLineCount();
+                    }
+                    pageEndLine = targetLineEnd;
+                    textEnd = targetTextEnd;
+                    pageText = targetPageText;
+                }
+            }
+            
             pages.add(pageText);
             pageToSentencesMap.add(new ArrayList<>());
             
@@ -1800,23 +2197,30 @@ public class MainActivity extends AppCompatActivity {
      * 페이지를 넘나드는 문장도 올바르게 처리
      */
     private void displayCurrentPage() {
-        // 페이지 이동 시 기존 하이라이트 제거 Runnable 취소 및 즉시 하이라이트 제거
-        if (highlightRemoveRunnable != null) {
-            mainHandler.removeCallbacks(highlightRemoveRunnable);
-            highlightRemoveRunnable = null;
-        }
-        // 즉시 하이라이트 제거 (텍스트를 다시 설정)
-        if (textDisplay != null && textDisplay.getText() != null) {
-            CharSequence currentText = textDisplay.getText();
-            textDisplay.setText(currentText);
-        }
-        
         if (pages.isEmpty() || currentPageIndex < 0 || currentPageIndex >= pages.size()) {
+            if (textDisplay != null) {
             textDisplay.setText("");
+            }
             return;
         }
         
         String pageText = pages.get(currentPageIndex);
+        
+        // 페이지 첫 줄의 앞쪽 공백 제거
+        if (pageText != null && !pageText.isEmpty()) {
+            int firstNewlineIndex = pageText.indexOf('\n');
+            if (firstNewlineIndex >= 0) {
+                // 첫 줄이 있는 경우
+                String firstLine = pageText.substring(0, firstNewlineIndex);
+                String restOfText = pageText.substring(firstNewlineIndex);
+                // 첫 줄의 앞쪽 공백 제거
+                String trimmedFirstLine = firstLine.replaceAll("^\\s+", "");
+                pageText = trimmedFirstLine + restOfText;
+            } else {
+                // 첫 줄만 있는 경우
+                pageText = pageText.replaceAll("^\\s+", "");
+            }
+        }
         
         // StaticLayout으로 계산한 텍스트를 그대로 사용 (줄바꿈 제거하지 않음)
         // 클릭 가능한 텍스트 생성 (스타일 없는 ClickableSpan)
@@ -1834,11 +2238,11 @@ public class MainActivity extends AppCompatActivity {
             // 페이지에 걸쳐있는 경우에도 클릭 가능하도록 부분 매칭 허용
             int sentenceStartInPage = pageText.indexOf(sentenceText);
             
-            // 전체 문장이 페이지에 없으면 문장의 일부라도 있는지 확인
+            // 전체 문장이 페이지에 없으면 간단한 부분 매칭만 시도 (성능 최적화)
             if (sentenceStartInPage < 0) {
-                // 문장의 일부가 페이지에 나타나는지 확인 (최소 10글자 이상)
-                for (int i = 0; i <= sentenceText.length() - 10; i++) {
-                    String sentencePart = sentenceText.substring(i, Math.min(i + 50, sentenceText.length()));
+                // 문장의 앞부분만 확인 (최대 50글자, 성능 최적화를 위해 루프 제거)
+                if (sentenceText.length() >= 10) {
+                    String sentencePart = sentenceText.substring(0, Math.min(50, sentenceText.length()));
                     sentenceStartInPage = pageText.indexOf(sentencePart);
                     if (sentenceStartInPage >= 0) {
                         // 부분 매칭을 찾았지만, 전체 문장을 클릭 가능하게 만들기 위해
@@ -1854,7 +2258,10 @@ public class MainActivity extends AppCompatActivity {
                             spannable.setSpan(new ClickableSpan() {
                                 @Override
                                 public void onClick(View widget) {
+                                    // 스크롤이 아닌 실제 클릭인지 확인
+                                    if (isActualClick()) {
                                     handleSentenceClick(fullSentence);
+                                    }
                                 }
                                 
                                 @Override
@@ -1866,7 +2273,6 @@ public class MainActivity extends AppCompatActivity {
                                 }
                             }, sentenceStartInPage, sentenceEndInPage, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
                         }
-                        break;
                     }
                 }
             } else {
@@ -1943,50 +2349,6 @@ public class MainActivity extends AppCompatActivity {
         
         // 페이지 번호 업데이트
         updatePageNumber();
-        
-        // 커스텀 MovementMethod: 클릭만 허용하고 스크롤/키 이벤트 완전히 차단
-        textDisplay.setMovementMethod(new LinkMovementMethod() {
-            @Override
-            public boolean canSelectArbitrarily() {
-                return false;
-            }
-            
-            @Override
-            public boolean onTouchEvent(android.widget.TextView widget, android.text.Spannable buffer, android.view.MotionEvent event) {
-                // 스크롤을 완전히 차단하고 클릭만 허용
-                if (event.getAction() == MotionEvent.ACTION_DOWN || 
-                    event.getAction() == MotionEvent.ACTION_UP) {
-                    return super.onTouchEvent(widget, buffer, event);
-                }
-                // MOVE 이벤트는 무시하여 스크롤 방지
-                return false;
-            }
-            
-            @Override
-            public boolean onKeyDown(android.widget.TextView widget, android.text.Spannable buffer, int keyCode, android.view.KeyEvent event) {
-                // 위/아래/좌/우 화살표 키 무시
-                if (keyCode == android.view.KeyEvent.KEYCODE_DPAD_UP ||
-                    keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN ||
-                    keyCode == android.view.KeyEvent.KEYCODE_DPAD_LEFT ||
-                    keyCode == android.view.KeyEvent.KEYCODE_DPAD_RIGHT) {
-                    return true; // 이벤트 소비하여 처리하지 않음
-                }
-                return super.onKeyDown(widget, buffer, keyCode, event);
-            }
-            
-            @Override
-            public boolean onKeyOther(android.widget.TextView widget, android.text.Spannable buffer, android.view.KeyEvent event) {
-                // 위/아래/좌/우 화살표 키 무시
-                int keyCode = event.getKeyCode();
-                if (keyCode == android.view.KeyEvent.KEYCODE_DPAD_UP ||
-                    keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN ||
-                    keyCode == android.view.KeyEvent.KEYCODE_DPAD_LEFT ||
-                    keyCode == android.view.KeyEvent.KEYCODE_DPAD_RIGHT) {
-                    return true; // 이벤트 소비하여 처리하지 않음
-                }
-                return super.onKeyOther(widget, buffer, event);
-            }
-        });
     }
     
     /**
@@ -2056,7 +2418,7 @@ public class MainActivity extends AppCompatActivity {
         
         // 절대 청크 번호로 파일 찾기 (현재 선택된 보이스)
         if (targetAbsoluteChunkIndex >= 0) {
-            File chunkFile = findChunkFile(selectedVoice, targetAbsoluteChunkIndex);
+            File chunkFile = findChunkFile(selectedVoice, selectedSpeed, targetAbsoluteChunkIndex);
             
             if (chunkFile != null && chunkFile.exists()) {
                 // 청크가 여러 페이지에 걸쳐있는지 확인하여 페이지 이동 처리
@@ -2095,38 +2457,42 @@ public class MainActivity extends AppCompatActivity {
                     }
                 }
                 
-                // 기존 오디오 파일이 있으면 바로 재생 (이후 청크들도 순차 재생)
-                // 기존 배치 생성 작업만 취소 (오디오 파일은 유지)
+                // 기존 오디오 파일이 있으면 바로 재생
+                // 기존 생성 작업만 취소 (오디오 파일은 유지)
                 cancelGenerationOnly();
-                // 이후 청크들을 순차 재생하기 위해 generateFromSentenceWithPriority 호출
-                // (이미 생성된 파일은 재사용)
-                generateFromSentenceWithPriority(clickedSentence);
+                // 선택한 문장부터 생성 및 재생
+                generateAudio(clickedSentence, null, null);
             } else {
                 // 해당 문장부터 생성 및 재생
-                // 기존 배치 생성 작업 즉시 취소 (최우선 순위)
+                // 기존 생성 작업 즉시 취소
                 cancelGenerationOnly();
-                // 선택한 문장을 최우선 순위로 생성
-                generateFromSentenceWithPriority(clickedSentence);
+                // 선택한 문장부터 생성 및 재생
+                generateAudio(clickedSentence, null, null);
             }
         } else {
             // 해당 문장부터 생성 및 재생
-            // 기존 배치 생성 작업 즉시 취소 (최우선 순위)
+            // 기존 생성 작업 즉시 취소
             cancelGenerationOnly();
             // 선택한 문장을 최우선 순위로 생성
-            generateFromSentenceWithPriority(clickedSentence);
+            generateAudio(clickedSentence, null, null);
         }
+        
+        // 클릭한 세그먼트에 #ccc 배경색 적용 (0.5초) - generateAudio 호출 후에 약간의 지연을 두고 적용
+        // Handler를 사용하여 UI 업데이트 후 하이라이트 적용 (50ms 지연)
+        mainHandler.postDelayed(() -> {
+            highlightClickedSegment(clickedSentence);
+        }, 50);
         
         // 기존 하이라이트 제거 Runnable 취소
         if (highlightRemoveRunnable != null) {
             mainHandler.removeCallbacks(highlightRemoveRunnable);
         }
         
-        // 0.5초 후 하이라이트 제거 (텍스트를 다시 설정하여 하이라이트 제거)
+        // 0.5초 후 하이라이트 제거
         highlightRemoveRunnable = () -> {
             if (textDisplay != null) {
                 // 텍스트를 다시 설정하여 하이라이트 제거
-                CharSequence currentText = textDisplay.getText();
-                textDisplay.setText(currentText);
+                displayCurrentPage();
             }
             highlightRemoveRunnable = null;
         };
@@ -2134,257 +2500,97 @@ public class MainActivity extends AppCompatActivity {
     }
     
     /**
-     * 특정 문장부터 생성 및 재생 (일반 버전)
-     * 목소리 변경 시나 청크 파일이 없을 때 사용
+     * 클릭한 세그먼트에 #ccc 배경색 적용 (재생 중인 세그먼트 배경 로직 재사용)
      */
-    private void generateFromSentence(String targetSentence) {
-        // 문장 위치 찾기
-        int sentenceIndex = -1;
-        for (int i = 0; i < sentences.size(); i++) {
-            if (sentences.get(i).contains(targetSentence) || targetSentence.contains(sentences.get(i))) {
-                sentenceIndex = i;
-                break;
-            }
-        }
-        
-        if (sentenceIndex < 0) {
+    private void highlightClickedSegment(String clickedSentence) {
+        if (textDisplay == null || pages.isEmpty() || clickedSentence == null || clickedSentence.trim().isEmpty()) {
             return;
         }
         
-        // 해당 문장부터의 텍스트 생성
-        StringBuilder textFromSentence = new StringBuilder();
-        for (int i = sentenceIndex; i < sentences.size(); i++) {
-            if (textFromSentence.length() > 0) {
-                textFromSentence.append(" ");
-            }
-            textFromSentence.append(sentences.get(i));
-        }
-        
-        // 기존 생성 작업 취소
-        cancelCurrentGeneration();
-        
-        // 재생 중지
-        stopAudio();
-        
-        // 재생리스트만 초기화 (오디오 파일은 유지)
-        audioChunks.clear();
-        chunkTexts.clear();
-        currentChunkIndex = 0;
-        
-        // 생성 시작
-        isGenerating = true;
-        generationStartTime = System.currentTimeMillis();
-        totalTextLength = textFromSentence.length();
-        totalAudioDuration = 0;
-        chunkProcessingTimes.clear();
-        chunkCPSList.clear();
-        chunkRTFList.clear();
-        totalChunkProcessingTime = 0;
-        updateLogConsole("", true);
-        
-        // 문장-청크 매핑 초기화 (해당 문장부터)
-        for (int i = sentenceIndex; i < sentences.size(); i++) {
-            if (i < sentenceToChunkMap.size()) {
-                sentenceToChunkMap.set(i, -1);
-            }
-        }
-        
-        // 람다 표현식에서 사용하기 위해 final 변수로 복사
-        final int startSentenceIndex = sentenceIndex;
-        
-        // 전체 텍스트의 청크 리스트 사용 (절대 번호 기준)
-        // allChunks는 setupPages()에서 이미 생성되어 있음
-        if (allChunks.isEmpty()) {
-            allChunks = chunkText(fullText);
-        }
-        
-        // 현재 문장이 속한 절대 청크 번호 찾기
-        int targetAbsoluteChunkIndex = -1;
-        if (sentenceIndex < sentenceToChunkMap.size() && sentenceToChunkMap.get(sentenceIndex) >= 0) {
-            targetAbsoluteChunkIndex = sentenceToChunkMap.get(sentenceIndex);
-        } else {
-            // 매핑이 없으면 전체 청크 리스트에서 찾기
-            String targetSentenceText = sentences.get(sentenceIndex);
-            for (int i = 0; i < allChunks.size(); i++) {
-                if (allChunks.get(i).contains(targetSentenceText)) {
-                    targetAbsoluteChunkIndex = i;
-                    break;
-                }
-            }
-        }
-        
-        // 절대 청크 번호를 찾지 못하면 처음부터 생성
-        if (targetAbsoluteChunkIndex < 0) {
-            targetAbsoluteChunkIndex = 0;
-        }
-        
-        // 현재 생성할 청크의 절대 시작 인덱스
-        firstChunkAbsoluteIndex = targetAbsoluteChunkIndex;
-        
-        // 해당 절대 청크 번호부터의 청크 리스트 생성
-        List<String> chunksFromIndex = new ArrayList<>();
-        if (targetAbsoluteChunkIndex < allChunks.size()) {
-            for (int i = targetAbsoluteChunkIndex; i < allChunks.size(); i++) {
-                chunksFromIndex.add(allChunks.get(i));
-            }
-        }
-        
-        // 즉시 상태 업데이트 (백그라운드 스레드 시작 전)
-        updateStatus("Generating segment " + (targetAbsoluteChunkIndex + 1) + "...");
-        // 첫 번째 청크 생성 중일 때 gen 아이콘 표시
-        playButton.setImageResource(R.drawable.ic_gen);
-        
-        final List<String> finalChunks = chunksFromIndex;
-        final int finalStartAbsoluteIndex = targetAbsoluteChunkIndex;
-        // 생성 시작 시점의 목소리 저장 (목소리 변경 감지용)
-        final String generationVoice = selectedVoice;
-        
-        currentGenerationTask = executorService.submit(() -> {
-            try {
-                List<String> chunks = finalChunks;
-                mainHandler.post(() -> updateStatus("Generating " + chunks.size() + " segments..."));
-                
-                if (chunks.isEmpty()) {
-                    throw new Exception("Chunk generation failed");
-                }
-                
-                // 첫 번째 청크 생성 및 즉시 재생
-                String firstChunk = chunks.get(0);
-                // 상태는 이미 업데이트되었으므로 여기서는 Play 버튼만 업데이트
-                mainHandler.post(() -> {
-                    // 첫 번째 청크 생성 중일 때 gen 아이콘 표시 (이미 설정되었지만 확실히 하기 위해)
-                    playButton.setImageResource(R.drawable.ic_gen);
-                });
-                
-                if (Thread.currentThread().isInterrupted()) {
+        // 현재 페이지 텍스트 가져오기
+        String pageText = pages.get(currentPageIndex);
+        if (pageText == null || pageText.isEmpty()) {
                     return;
                 }
                 
-                long firstChunkStartTime2 = System.currentTimeMillis();
-                byte[] firstAudioData = ttsEngine.generate(firstChunk, generationVoice);
-                
-                if (Thread.currentThread().isInterrupted()) {
-                    return;
-                }
-                
-                if (firstAudioData == null || firstAudioData.length == 0) {
-                    throw new Exception("First chunk generation failed");
-                }
-                
-                long firstChunkEndTime2 = System.currentTimeMillis();
-                double firstChunkProcessingTime2 = (firstChunkEndTime2 - firstChunkStartTime2) / 1000.0;
-                chunkProcessingTimes.add(firstChunkProcessingTime2);
-                totalChunkProcessingTime += firstChunkProcessingTime2;
-                
-                // 절대 청크 번호 사용
-                int absoluteChunkIndex = finalStartAbsoluteIndex;
-                File firstChunkFile = saveChunk(firstAudioData, absoluteChunkIndex, generationVoice);
-                audioChunks.add(firstChunkFile);
-                chunkTexts.add(firstChunk); // 청크 텍스트 저장
-                
-                // 문장-청크 매핑 업데이트 (절대 번호 사용)
-                mapChunksToSentencesWithAbsoluteIndex(chunks, startSentenceIndex, finalStartAbsoluteIndex);
-                
-                // 첫 번째 청크 즉시 재생 (오디오 길이 계산은 playFirstChunk 내부에서 수행)
-                mainHandler.post(() -> {
-                    if (!Thread.currentThread().isInterrupted()) {
-                        playFirstChunk(firstChunkFile, firstChunk, firstChunkProcessingTime2);
-                        updateStatus("Playing segment " + (finalStartAbsoluteIndex + 1) + "... (generating rest)");
-                    }
-                });
-                
-                // 첫 번째 청크 생성 및 재생 완료 후, 나머지 청크들을 배치 생성
-                for (int i = 1; i < chunks.size(); i++) {
-                    if (Thread.currentThread().isInterrupted()) {
+        // 클릭한 문장을 현재 페이지에서 찾기
+        String clickedSentenceTrimmed = clickedSentence.trim();
+        int sentenceStartInPage = pageText.indexOf(clickedSentenceTrimmed);
+        
+        // 정확히 일치하지 않으면 부분 매칭 시도
+        if (sentenceStartInPage < 0 && clickedSentenceTrimmed.length() >= 10) {
+            String sentencePart = clickedSentenceTrimmed.substring(0, Math.min(50, clickedSentenceTrimmed.length()));
+            sentenceStartInPage = pageText.indexOf(sentencePart);
+        }
+        
+        if (sentenceStartInPage < 0) {
                         return;
                     }
                     
-                    // 목소리가 변경되었는지 확인 (다른 목소리의 생성 작업 중단)
-                    if (!selectedVoice.equals(generationVoice)) {
-                        android.util.Log.d("MainActivity", "Voice changed from " + generationVoice + " to " + selectedVoice + ", stopping generation");
+        // 현재 표시된 텍스트 가져오기
+        CharSequence currentText = textDisplay.getText();
+        if (!(currentText instanceof SpannableString)) {
                         return;
                     }
                     
-                    String chunk = chunks.get(i);
-                    final int chunkIndex = i;
-                    final int chunkAbsoluteIndex = finalStartAbsoluteIndex + i;
-                    mainHandler.post(() -> updateStatus("Generating segment " + (chunkAbsoluteIndex + 1) + "..."));
-                    
-                    long chunkStartTime = System.currentTimeMillis();
-                    byte[] chunkAudioData = ttsEngine.generate(chunk, generationVoice);
-                    
-                    if (Thread.currentThread().isInterrupted()) {
-                        return;
-                    }
-                    
-                    if (chunkAudioData != null && chunkAudioData.length > 0) {
-                        long chunkEndTime = System.currentTimeMillis();
-                        double chunkProcessingTime = (chunkEndTime - chunkStartTime) / 1000.0;
-                        chunkProcessingTimes.add(chunkProcessingTime);
-                        totalChunkProcessingTime += chunkProcessingTime;
-                        
-                        // 절대 청크 번호 사용 (이미 위에서 정의됨)
-                        File chunkFile = saveChunk(chunkAudioData, chunkAbsoluteIndex, generationVoice);
-                        audioChunks.add(chunkFile);
-                        chunkTexts.add(chunk); // 청크 텍스트 저장
-                        
-                        // Estimate audio duration from chunk size
-                        long chunkSize = chunkFile.length();
-                        double estimatedDuration = (chunkSize > 44) ? (chunkSize - 44) / (24000.0 * 2.0) : 0;
-                        totalAudioDuration += estimatedDuration;
-                        
-                        // Calculate metrics for this chunk
-                        double chunkCPS = chunk.length() > 0 && chunkProcessingTime > 0 ? chunk.length() / chunkProcessingTime : 0;
-                        double chunkRTF = estimatedDuration > 0 ? chunkProcessingTime / estimatedDuration : 0;
-                        chunkCPSList.add(chunkCPS);
-                        chunkRTFList.add(chunkRTF);
-                        
-                        // Update log console
-                        updateLogConsoleMetrics();
-                        
-                        mainHandler.post(() -> {
-                            if (mediaPlayer != null && !mediaPlayer.isPlaying() && 
-                                !isPaused && currentChunkIndex < audioChunks.size() - 1) {
-                                playNextChunk();
-                            }
-                        });
-                    }
-                }
-                
-                mainHandler.post(() -> {
-                    updateStatus("All segments generated");
-                    isGenerating = false;
-                    currentGenerationTask = null;
-                });
-            } catch (java.util.concurrent.CancellationException e) {
-                android.util.Log.d("MainActivity", "Generation cancelled");
-            } catch (Exception e) {
-                android.util.Log.e("MainActivity", "Generation error", e);
-                mainHandler.post(() -> {
-                    updateStatus("Generation error: " + e.getMessage());
-                    isGenerating = false;
-                    currentGenerationTask = null;
-                });
-            }
-        });
+        SpannableString spannable = (SpannableString) currentText;
+        
+        // 하이라이트 범위 계산
+        int highlightStart = sentenceStartInPage;
+        int highlightEnd = sentenceStartInPage + clickedSentenceTrimmed.length();
+        
+        // 범위가 spannable 길이를 초과하지 않도록 조정
+        if (highlightEnd > spannable.length()) {
+            highlightEnd = spannable.length();
+        }
+        
+        if (highlightStart >= 0 && highlightEnd > highlightStart && highlightEnd <= spannable.length()) {
+            // #ccc 배경색 적용 (0xFFCCCCCC)
+            spannable.setSpan(new BackgroundColorSpan(0xFFCCCCCC), 
+                highlightStart, highlightEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            textDisplay.setText(spannable);
+        }
     }
     
     /**
-     * 특정 문장부터 생성 및 재생 (최우선 순위)
-     * 문장 선택 시 사용 - 기존 배치 생성보다 우선순위가 높음
+     * 특정 문장부터 생성 및 재생
+     * 어떤 문장을, 어떤 목소리로, 어떤 속도로 생성 및 재생
+     * 만약 이미 생성된 파일이 있다면 새로 생성하지 않고, 기존 파일 재생
+     * 멈추었을 때 생성된 파일들 유지
+     * 
+     * @param targetSentence 재생할 문장 (문자열 또는 문장 인덱스)
+     * @param voice 목소리 (null이면 selectedVoice 사용)
+     * @param speed 속도 (null이면 selectedSpeed 사용)
      */
-    private void generateFromSentenceWithPriority(String targetSentence) {
+    private void generateAudio(String targetSentence, String voice, String speed) {
+        // 목소리 설정 (파라미터가 없으면 selectedVoice 사용)
+        final String targetVoice = (voice != null) ? voice : selectedVoice;
+        // 속도 설정 (파라미터가 없으면 selectedSpeed 사용)
+        final String targetSpeed = (speed != null) ? speed : selectedSpeed;
+        final double speechLength = speedToSpeechLength(targetSpeed);
+        
         // 문장 위치 찾기
         int sentenceIndex = -1;
+        
+        // targetSentence가 숫자 문자열인지 확인 (문장 인덱스로 사용)
+        try {
+            int index = Integer.parseInt(targetSentence.trim());
+            if (index >= 0 && index < sentences.size()) {
+                sentenceIndex = index;
+            }
+        } catch (NumberFormatException e) {
+            // 숫자가 아니면 문장 텍스트로 검색
         for (int i = 0; i < sentences.size(); i++) {
             if (sentences.get(i).contains(targetSentence) || targetSentence.contains(sentences.get(i))) {
                 sentenceIndex = i;
                 break;
+                }
             }
         }
         
         if (sentenceIndex < 0) {
-            return;
+            // 문장을 찾을 수 없으면 0번 문장 사용
+            sentenceIndex = 0;
         }
         
         // 해당 문장부터의 텍스트 생성
@@ -2396,9 +2602,11 @@ public class MainActivity extends AppCompatActivity {
             textFromSentence.append(sentences.get(i));
         }
         
-        // 기존 배치 생성 작업만 취소 (오디오 파일은 유지)
-        // 문장 선택은 최우선 순위이므로 기존 생성 작업 즉시 중단
+        // 기존 생성 작업만 취소 (오디오 파일은 유지)
         cancelGenerationOnly();
+        
+        // 백그라운드 생성 작업 중단
+        cancelBackgroundGeneration();
         
         // 재생 중지
         stopAudio();
@@ -2416,6 +2624,10 @@ public class MainActivity extends AppCompatActivity {
         chunkProcessingTimes.clear();
         chunkCPSList.clear();
         chunkRTFList.clear();
+        // Map은 초기화하지 않음 (기존 파일 재생 시 저장된 CPS/RTF 사용)
+        // chunkCPSMap.clear();
+        // chunkRTFMap.clear();
+        chunkPageInfoCache.clear(); // 청크 페이지 정보 캐시 초기화
         totalChunkProcessingTime = 0;
         updateLogConsole("", true);
         
@@ -2467,9 +2679,9 @@ public class MainActivity extends AppCompatActivity {
         }
         
         // 첫 번째 청크 파일이 이미 있는지 확인
-        File firstChunkFile = findChunkFile(selectedVoice, targetAbsoluteChunkIndex);
+        File firstChunkFile = findChunkFile(targetVoice, targetSpeed, targetAbsoluteChunkIndex);
         
-        // 첫 번째 청크 파일이 있으면 바로 재생하고, 이후 청크들만 백그라운드에서 처리
+        // 첫 번째 청크 파일이 있으면 바로 재생
         if (firstChunkFile != null && firstChunkFile.exists()) {
             // 기존 오디오 파일이 있으면 바로 재생
             android.util.Log.d("MainActivity", "Existing audio file found for chunk " + (targetAbsoluteChunkIndex + 1) + ", playing immediately");
@@ -2498,91 +2710,11 @@ public class MainActivity extends AppCompatActivity {
             
             // 첫 번째 청크 즉시 재생
             playFirstChunk(firstChunkFile, allChunks.get(targetAbsoluteChunkIndex), 0.0);
-            updateStatus("Playing segment " + (targetAbsoluteChunkIndex + 1) + "... (checking rest)");
+            updateStatus("Playing segment " + (targetAbsoluteChunkIndex + 1) + "...");
             
-            // 이후 청크들을 백그라운드에서 확인 및 생성
-            // (이미 생성된 파일은 재사용, 없는 파일만 생성)
-            final List<String> finalChunks = chunksFromIndex;
-            final int finalStartAbsoluteIndex = targetAbsoluteChunkIndex;
-            final String generationVoice = selectedVoice;
+            // 재생 시점에 백그라운드 생성 시작 (n+1, n+2, n+3)
+            startBackgroundGeneration(targetAbsoluteChunkIndex, targetVoice, targetSpeed);
             
-            currentGenerationTask = executorService.submit(() -> {
-                try {
-                    // 나머지 청크들 처리 (첫 번째 청크는 이미 재생 중)
-                    for (int i = 1; i < finalChunks.size(); i++) {
-                        if (Thread.currentThread().isInterrupted()) {
-                            return;
-                        }
-                        
-                        // 목소리가 변경되었는지 확인
-                        if (!selectedVoice.equals(generationVoice)) {
-                            android.util.Log.d("MainActivity", "Voice changed from " + generationVoice + " to " + selectedVoice + ", stopping generation");
-                            return;
-                        }
-                        
-                        String chunk = finalChunks.get(i);
-                        final int chunkAbsoluteIndex = finalStartAbsoluteIndex + i;
-                        
-                        // 이미 생성된 파일이 있으면 재사용
-                        File chunkFile = findChunkFile(generationVoice, chunkAbsoluteIndex);
-                        
-                        if (chunkFile == null || !chunkFile.exists()) {
-                            // 파일이 없으면 생성
-                            mainHandler.post(() -> updateStatus("Generating segment " + (chunkAbsoluteIndex + 1) + "..."));
-                            
-                            long chunkStartTime = System.currentTimeMillis();
-                            byte[] chunkAudioData = ttsEngine.generate(chunk, generationVoice);
-                            
-                            if (Thread.currentThread().isInterrupted()) {
-                                return;
-                            }
-                            
-                            if (chunkAudioData != null && chunkAudioData.length > 0) {
-                                long chunkEndTime = System.currentTimeMillis();
-                                double chunkProcessingTime = (chunkEndTime - chunkStartTime) / 1000.0;
-                                chunkProcessingTimes.add(chunkProcessingTime);
-                                totalChunkProcessingTime += chunkProcessingTime;
-                                
-                                chunkFile = saveChunk(chunkAudioData, chunkAbsoluteIndex, generationVoice);
-                            } else {
-                                continue;
-                            }
-                        }
-                        
-                        if (chunkFile != null && chunkFile.exists()) {
-                            audioChunks.add(chunkFile);
-                            chunkTexts.add(chunk);
-                            
-                            // Estimate audio duration from chunk size
-                            long chunkSize = chunkFile.length();
-                            double estimatedDuration = (chunkSize > 44) ? (chunkSize - 44) / (24000.0 * 2.0) : 0;
-                            totalAudioDuration += estimatedDuration;
-                            
-                            mainHandler.post(() -> {
-                                if (mediaPlayer != null && !mediaPlayer.isPlaying() && 
-                                    !isPaused && currentChunkIndex < audioChunks.size() - 1) {
-                                    playNextChunk();
-                                }
-                            });
-                        }
-                    }
-                    
-                    mainHandler.post(() -> {
-                        updateStatus("All segments ready");
-                        isGenerating = false;
-                        currentGenerationTask = null;
-                    });
-                } catch (java.util.concurrent.CancellationException e) {
-                    android.util.Log.d("MainActivity", "Generation cancelled");
-                } catch (Exception e) {
-                    android.util.Log.e("MainActivity", "Generation error", e);
-                    mainHandler.post(() -> {
-                        updateStatus("Generation error: " + e.getMessage());
-                        isGenerating = false;
-                        currentGenerationTask = null;
-                    });
-                }
-            });
             return; // 첫 번째 청크가 있으면 여기서 종료
         }
         
@@ -2595,7 +2727,7 @@ public class MainActivity extends AppCompatActivity {
         final List<String> finalChunks = chunksFromIndex;
         final int finalStartAbsoluteIndex = targetAbsoluteChunkIndex;
         // 생성 시작 시점의 목소리 저장 (목소리 변경 감지용)
-        final String generationVoice = selectedVoice;
+        final String generationVoice = targetVoice;
         
         currentGenerationTask = executorService.submit(() -> {
             try {
@@ -2620,13 +2752,13 @@ public class MainActivity extends AppCompatActivity {
                 
                 // 절대 청크 번호 사용
                 int absoluteChunkIndex = finalStartAbsoluteIndex;
-                File firstChunkFile2 = findChunkFile(generationVoice, absoluteChunkIndex);
+                File firstChunkFile2 = findChunkFile(generationVoice, targetSpeed, absoluteChunkIndex);
                 double firstChunkProcessingTime2 = 0.0;
                 
                 // 파일이 없으면 생성
                 if (firstChunkFile2 == null || !firstChunkFile2.exists()) {
                     long firstChunkStartTime2 = System.currentTimeMillis();
-                    byte[] firstAudioData = ttsEngine.generate(firstChunk, generationVoice);
+                    byte[] firstAudioData = ttsEngine.generate(firstChunk, generationVoice, speechLength);
                     
                     if (Thread.currentThread().isInterrupted()) {
                         return;
@@ -2641,7 +2773,13 @@ public class MainActivity extends AppCompatActivity {
                     chunkProcessingTimes.add(firstChunkProcessingTime2);
                     totalChunkProcessingTime += firstChunkProcessingTime2;
                     
-                    firstChunkFile2 = saveChunk(firstAudioData, absoluteChunkIndex, generationVoice);
+                    firstChunkFile2 = saveChunk(firstAudioData, absoluteChunkIndex, generationVoice, targetSpeed);
+                    
+                    // CPS/RTF 저장 (임시값, playFirstChunk에서 정확한 오디오 길이로 재계산됨)
+                    long fileSize = firstChunkFile2.length();
+                    double estimatedDuration = (fileSize > 44) ? (fileSize - 44) / (24000.0 * 2.0) : 0;
+                    // Map에 저장 (playFirstChunk에서 정확한 값으로 업데이트됨)
+                    saveChunkMetrics(absoluteChunkIndex, firstChunk, firstChunkProcessingTime2, estimatedDuration);
                 }
                 
                 audioChunks.add(firstChunkFile2);
@@ -2659,86 +2797,15 @@ public class MainActivity extends AppCompatActivity {
                 mainHandler.post(() -> {
                     if (!Thread.currentThread().isInterrupted()) {
                         playFirstChunk(finalFirstChunkFile, firstChunk, finalFirstChunkProcessingTime2);
-                        updateStatus("Playing segment " + (finalStartAbsoluteIndex + 1) + "... (generating rest)");
-                    }
-                });
-                
-                // 첫 번째 청크 생성 및 재생 완료 후, 나머지 청크들을 배치 생성
-                // (기존 배치 생성보다 우선순위가 높은 작업이므로 먼저 완료된 후 진행)
-                for (int i = 1; i < chunks.size(); i++) {
-                    if (Thread.currentThread().isInterrupted()) {
-                        return;
-                    }
-                    
-                    // 목소리가 변경되었는지 확인 (다른 목소리의 생성 작업 중단)
-                    if (!selectedVoice.equals(generationVoice)) {
-                        android.util.Log.d("MainActivity", "Voice changed from " + generationVoice + " to " + selectedVoice + ", stopping generation");
-                        return;
-                    }
-                    
-                    String chunk = chunks.get(i);
-                    final int chunkIndex = i;
-                    final int chunkAbsoluteIndex = finalStartAbsoluteIndex + i;
-                    
-                    // 이미 생성된 파일이 있으면 재사용
-                    File chunkFile = findChunkFile(generationVoice, chunkAbsoluteIndex);
-                    double chunkProcessingTime = 0.0;
-                    
-                    if (chunkFile == null || !chunkFile.exists()) {
-                        // 파일이 없으면 생성
-                        mainHandler.post(() -> updateStatus("Generating segment " + (chunkAbsoluteIndex + 1) + "..."));
+                        updateStatus("Playing segment " + (finalStartAbsoluteIndex + 1) + "...");
                         
-                        long chunkStartTime = System.currentTimeMillis();
-                        byte[] chunkAudioData = ttsEngine.generate(chunk, generationVoice);
-                        
-                        if (Thread.currentThread().isInterrupted()) {
-                            return;
-                        }
-                        
-                        if (chunkAudioData != null && chunkAudioData.length > 0) {
-                            long chunkEndTime = System.currentTimeMillis();
-                            chunkProcessingTime = (chunkEndTime - chunkStartTime) / 1000.0;
-                            chunkProcessingTimes.add(chunkProcessingTime);
-                            totalChunkProcessingTime += chunkProcessingTime;
-                            
-                            // 절대 청크 번호 사용 (이미 위에서 정의됨)
-                            chunkFile = saveChunk(chunkAudioData, chunkAbsoluteIndex, generationVoice);
-                        } else {
-                            continue; // 생성 실패 시 다음 청크로
-                        }
-                    }
-                    
-                    if (chunkFile != null && chunkFile.exists()) {
-                        audioChunks.add(chunkFile);
-                        chunkTexts.add(chunk); // 청크 텍스트 저장
-                        
-                        // Estimate audio duration from chunk size
-                        long chunkSize = chunkFile.length();
-                        double estimatedDuration = (chunkSize > 44) ? (chunkSize - 44) / (24000.0 * 2.0) : 0;
-                        totalAudioDuration += estimatedDuration;
-                        
-                        // Calculate metrics for this chunk (파일이 새로 생성된 경우에만)
-                        if (chunkProcessingTime > 0) {
-                            double chunkCPS = chunk.length() > 0 && chunkProcessingTime > 0 ? chunk.length() / chunkProcessingTime : 0;
-                            double chunkRTF = estimatedDuration > 0 ? chunkProcessingTime / estimatedDuration : 0;
-                            chunkCPSList.add(chunkCPS);
-                            chunkRTFList.add(chunkRTF);
-                            
-                            // Update log console (파일이 새로 생성된 경우에만)
-                            updateLogConsoleMetrics();
-                        }
-                        
-                        mainHandler.post(() -> {
-                            if (mediaPlayer != null && !mediaPlayer.isPlaying() && 
-                                !isPaused && currentChunkIndex < audioChunks.size() - 1) {
-                                playNextChunk();
+                        // 재생 시점에 백그라운드 생성 시작 (n+1, n+2, n+3)
+                        startBackgroundGeneration(finalStartAbsoluteIndex, generationVoice, targetSpeed);
                             }
                         });
-                    }
-                }
                 
                 mainHandler.post(() -> {
-                    updateStatus("All segments generated");
+                    updateStatus("Segment generated and playing");
                     isGenerating = false;
                     currentGenerationTask = null;
                 });
@@ -2746,14 +2813,251 @@ public class MainActivity extends AppCompatActivity {
                 android.util.Log.d("MainActivity", "Generation cancelled");
             } catch (Exception e) {
                 if (!Thread.currentThread().isInterrupted()) {
-                    mainHandler.post(() -> {
+                mainHandler.post(() -> {
                         updateStatus("Error: " + e.getMessage(), true);
-                        isGenerating = false;
-                        currentGenerationTask = null;
-                    });
+                    isGenerating = false;
+                    currentGenerationTask = null;
+                });
                 }
             }
         });
+    }
+    
+    /**
+     * 백그라운드에서 다음 세그먼트들을 생성
+     * @param currentAbsoluteChunkIndex 현재 재생 중인 청크의 절대 인덱스
+     * @param voice 생성에 사용할 목소리
+     */
+    private void startBackgroundGeneration(int currentAbsoluteChunkIndex, String voice, String speed) {
+        // 기존 백그라운드 생성 작업 취소
+        cancelBackgroundGeneration();
+        
+        // 현재 청크에 해당하는 문장 인덱스 찾기
+        int currentSentenceIndex = -1;
+        for (int i = 0; i < sentenceToChunkMap.size(); i++) {
+            if (sentenceToChunkMap.get(i) == currentAbsoluteChunkIndex) {
+                currentSentenceIndex = i;
+                break;
+            }
+        }
+        
+        // 문장을 찾지 못하면 청크 텍스트로 문장 찾기
+        if (currentSentenceIndex < 0 && currentAbsoluteChunkIndex >= 0 && currentAbsoluteChunkIndex < allChunks.size()) {
+            String currentChunkText = allChunks.get(currentAbsoluteChunkIndex);
+            for (int i = 0; i < sentences.size(); i++) {
+                if (sentences.get(i).contains(currentChunkText) || currentChunkText.contains(sentences.get(i))) {
+                    currentSentenceIndex = i;
+                    break;
+                }
+            }
+        }
+        
+        if (currentSentenceIndex < 0 || currentSentenceIndex >= sentences.size() - 1) {
+            // 다음 문장이 없으면 백그라운드 생성 불필요
+            return;
+        }
+                    
+        // n+1, n+2, n+3 문장의 청크 인덱스를 큐에 추가
+        int nextSentenceIndex1 = currentSentenceIndex + 1;
+        int nextSentenceIndex2 = currentSentenceIndex + 2;
+        int nextSentenceIndex3 = currentSentenceIndex + 3;
+        
+        // n+1 문장의 청크 인덱스 찾기
+        int nextChunkIndex1 = -1;
+        if (nextSentenceIndex1 < sentenceToChunkMap.size() && sentenceToChunkMap.get(nextSentenceIndex1) >= 0) {
+            nextChunkIndex1 = sentenceToChunkMap.get(nextSentenceIndex1);
+        } else {
+            // 매핑이 없으면 전체 청크 리스트에서 찾기
+            String nextSentenceText1 = sentences.get(nextSentenceIndex1);
+            for (int i = 0; i < allChunks.size(); i++) {
+                if (allChunks.get(i).contains(nextSentenceText1)) {
+                    nextChunkIndex1 = i;
+                    break;
+                }
+            }
+        }
+        
+        // n+2 문장의 청크 인덱스 찾기
+        int nextChunkIndex2 = -1;
+        if (nextSentenceIndex2 < sentences.size()) {
+            if (nextSentenceIndex2 < sentenceToChunkMap.size() && sentenceToChunkMap.get(nextSentenceIndex2) >= 0) {
+                nextChunkIndex2 = sentenceToChunkMap.get(nextSentenceIndex2);
+        } else {
+            // 매핑이 없으면 전체 청크 리스트에서 찾기
+                String nextSentenceText2 = sentences.get(nextSentenceIndex2);
+            for (int i = 0; i < allChunks.size(); i++) {
+                    if (allChunks.get(i).contains(nextSentenceText2)) {
+                        nextChunkIndex2 = i;
+                    break;
+                }
+            }
+        }
+        }
+        
+        // n+3 문장의 청크 인덱스 찾기
+        int nextChunkIndex3 = -1;
+        if (nextSentenceIndex3 < sentences.size()) {
+            if (nextSentenceIndex3 < sentenceToChunkMap.size() && sentenceToChunkMap.get(nextSentenceIndex3) >= 0) {
+                nextChunkIndex3 = sentenceToChunkMap.get(nextSentenceIndex3);
+            } else {
+                // 매핑이 없으면 전체 청크 리스트에서 찾기
+                String nextSentenceText3 = sentences.get(nextSentenceIndex3);
+                for (int i = 0; i < allChunks.size(); i++) {
+                    if (allChunks.get(i).contains(nextSentenceText3)) {
+                        nextChunkIndex3 = i;
+                        break;
+                    }
+                }
+            }
+        }
+        
+        // 큐에 추가
+        if (nextChunkIndex1 >= 0) {
+            backgroundGenerationQueue.offer(nextChunkIndex1);
+        }
+        if (nextChunkIndex2 >= 0) {
+            backgroundGenerationQueue.offer(nextChunkIndex2);
+        }
+        if (nextChunkIndex3 >= 0) {
+            backgroundGenerationQueue.offer(nextChunkIndex3);
+        }
+        
+        // 백그라운드 생성 작업 시작
+        if (!backgroundGenerationQueue.isEmpty()) {
+            backgroundGenerationTask = executorService.submit(() -> {
+                processBackgroundGenerationQueue(voice, speed);
+            });
+        }
+    }
+    
+    /**
+     * 백그라운드 생성 큐 처리
+     * @param voice 생성에 사용할 목소리
+     * @param speed 생성에 사용할 속도
+     */
+    private void processBackgroundGenerationQueue(String voice, String speed) {
+        double speechLength = speedToSpeechLength(speed);
+        while (!backgroundGenerationQueue.isEmpty() && !Thread.currentThread().isInterrupted()) {
+            Integer chunkIndex = backgroundGenerationQueue.poll();
+            if (chunkIndex == null) {
+                break;
+            }
+            
+            try {
+                // 이미 파일이 있으면 스킵
+                File existingFile = findChunkFile(voice, speed, chunkIndex);
+                if (existingFile != null && existingFile.exists()) {
+                    android.util.Log.d("MainActivity", "Background: Chunk " + (chunkIndex + 1) + " already exists, skipping");
+                    continue;
+                }
+                
+                // 청크 텍스트 가져오기
+                if (chunkIndex >= allChunks.size()) {
+                    continue;
+                }
+                
+                String chunkText = allChunks.get(chunkIndex);
+                
+                // 청크 생성
+                android.util.Log.d("MainActivity", "Background: Generating chunk " + (chunkIndex + 1));
+                long generationStartTime = System.currentTimeMillis();
+                byte[] audioData = ttsEngine.generate(chunkText, voice, speechLength);
+                long generationEndTime = System.currentTimeMillis();
+                double processingTime = (generationEndTime - generationStartTime) / 1000.0;
+                        
+                        if (Thread.currentThread().isInterrupted()) {
+                            return;
+                        }
+                        
+                if (audioData != null && audioData.length > 0) {
+                    File savedFile = saveChunk(audioData, chunkIndex, voice, speed);
+                    
+                    // 오디오 길이 계산
+                    double audioDuration = 0;
+                    if (savedFile != null && savedFile.exists()) {
+                        long fileSize = savedFile.length();
+                        audioDuration = (fileSize > 44) ? (fileSize - 44) / (24000.0 * 2.0) : 0;
+                    }
+                    
+                    // CPS/RTF 저장
+                    saveChunkMetrics(chunkIndex, chunkText, processingTime, audioDuration);
+                    
+                    android.util.Log.d("MainActivity", "Background: Chunk " + (chunkIndex + 1) + " generated successfully");
+                }
+                } catch (Exception e) {
+                android.util.Log.e("MainActivity", "Background generation error for chunk " + (chunkIndex + 1) + ": " + e.getMessage());
+            }
+        }
+        
+        backgroundGenerationTask = null;
+    }
+    
+    /**
+     * 다음 청크 재생 시점에 n+3을 백그라운드 생성에 추가
+     * @param currentAbsoluteChunkIndex 현재 재생 중인 청크의 절대 인덱스
+     * @param voice 생성에 사용할 목소리
+     * @param speed 생성에 사용할 속도
+     */
+    private void addNextToBackgroundQueue(int currentAbsoluteChunkIndex, String voice, String speed) {
+        // 현재 청크에 해당하는 문장 인덱스 찾기
+        int currentSentenceIndex = -1;
+        for (int i = 0; i < sentenceToChunkMap.size(); i++) {
+            if (sentenceToChunkMap.get(i) == currentAbsoluteChunkIndex) {
+                currentSentenceIndex = i;
+                break;
+            }
+        }
+        
+        // 문장을 찾지 못하면 청크 텍스트로 문장 찾기
+        if (currentSentenceIndex < 0 && currentAbsoluteChunkIndex >= 0 && currentAbsoluteChunkIndex < allChunks.size()) {
+            String currentChunkText = allChunks.get(currentAbsoluteChunkIndex);
+            for (int i = 0; i < sentences.size(); i++) {
+                if (sentences.get(i).contains(currentChunkText) || currentChunkText.contains(sentences.get(i))) {
+                    currentSentenceIndex = i;
+                    break;
+                }
+            }
+        }
+        
+        if (currentSentenceIndex < 0 || currentSentenceIndex >= sentences.size() - 2) {
+            // n+3 문장이 없으면 추가 불필요
+                        return;
+                    }
+                    
+        // n+3 문장의 청크 인덱스 찾기
+        int nextSentenceIndex3 = currentSentenceIndex + 3;
+        int nextChunkIndex3 = -1;
+        
+        if (nextSentenceIndex3 < sentenceToChunkMap.size() && sentenceToChunkMap.get(nextSentenceIndex3) >= 0) {
+            nextChunkIndex3 = sentenceToChunkMap.get(nextSentenceIndex3);
+                        } else {
+            // 매핑이 없으면 전체 청크 리스트에서 찾기
+            if (nextSentenceIndex3 < sentences.size()) {
+                String nextSentenceText3 = sentences.get(nextSentenceIndex3);
+                for (int i = 0; i < allChunks.size(); i++) {
+                    if (allChunks.get(i).contains(nextSentenceText3)) {
+                        nextChunkIndex3 = i;
+                        break;
+                    }
+                }
+            }
+        }
+        
+        // 큐에 추가
+        if (nextChunkIndex3 >= 0) {
+            // 이미 큐에 있으면 추가하지 않음
+            if (!backgroundGenerationQueue.contains(nextChunkIndex3)) {
+                backgroundGenerationQueue.offer(nextChunkIndex3);
+                android.util.Log.d("MainActivity", "Background: Added chunk " + (nextChunkIndex3 + 1) + " to queue");
+                
+                // 백그라운드 생성 작업이 없으면 시작
+                if (backgroundGenerationTask == null || backgroundGenerationTask.isDone()) {
+                    backgroundGenerationTask = executorService.submit(() -> {
+                        processBackgroundGenerationQueue(voice, speed);
+                    });
+                }
+            }
+        }
     }
     
     /**
@@ -2776,9 +3080,9 @@ public class MainActivity extends AppCompatActivity {
         // audioChunks가 비어있지 않고, currentChunkIndex가 유효한 범위 내에 있는지 확인
         if (audioChunks.isEmpty()) {
             android.util.Log.d("MainActivity", "Voice change: audioChunks is empty, generating from beginning");
-            if (!fullText.isEmpty()) {
-                cancelCurrentGeneration();
-                generateAudio();
+            if (!sentences.isEmpty()) {
+                cancelGenerationOnly();
+                generateAudio("0", selectedVoice, null);
             }
             return;
         }
@@ -2787,9 +3091,9 @@ public class MainActivity extends AppCompatActivity {
         if (currentChunkIndex < 0 || currentChunkIndex >= audioChunks.size()) {
             android.util.Log.w("MainActivity", "Voice change: currentChunkIndex out of range: " + currentChunkIndex + 
                 " (audioChunks.size(): " + audioChunks.size() + "), generating from beginning");
-            if (!fullText.isEmpty()) {
-                cancelCurrentGeneration();
-                generateAudio();
+            if (!sentences.isEmpty()) {
+                cancelGenerationOnly();
+                generateAudio("0", selectedVoice, null);
             }
             return;
         }
@@ -2801,25 +3105,25 @@ public class MainActivity extends AppCompatActivity {
         if (chunkTexts.isEmpty() || currentChunkIndex >= chunkTexts.size()) {
             android.util.Log.w("MainActivity", "Voice change: chunkTexts is empty or currentChunkIndex out of range: " + 
                 currentChunkIndex + " (chunkTexts.size(): " + chunkTexts.size() + "), generating from beginning");
-            if (!fullText.isEmpty()) {
-                cancelCurrentGeneration();
-                generateAudio();
+            if (!sentences.isEmpty()) {
+                cancelGenerationOnly();
+                generateAudio("0", selectedVoice, null);
             }
             return;
         }
         
-        // 현재 청크의 텍스트 가져오기 (cancelCurrentGeneration 호출 전에!)
+        // 현재 청크의 텍스트 가져오기 (cancelGenerationOnly 호출 전에!)
         currentChunkText = chunkTexts.get(currentChunkIndex);
         if (currentChunkText == null || currentChunkText.trim().isEmpty()) {
             android.util.Log.w("MainActivity", "Voice change: currentChunkText is null or empty, generating from beginning");
-            if (!fullText.isEmpty()) {
-                cancelCurrentGeneration();
-                generateAudio();
+            if (!sentences.isEmpty()) {
+                cancelGenerationOnly();
+                generateAudio("0", selectedVoice, null);
             }
             return;
         }
         
-        // 현재 절대 청크 번호에 해당하는 문장 찾기 - cancelCurrentGeneration 호출 전에!
+        // 현재 절대 청크 번호에 해당하는 문장 찾기 - cancelGenerationOnly 호출 전에!
         for (int i = 0; i < sentenceToChunkMap.size(); i++) {
             if (sentenceToChunkMap.get(i) == currentAbsoluteChunkIndex) {
                 targetSentenceIndex = i;
@@ -2827,7 +3131,7 @@ public class MainActivity extends AppCompatActivity {
             }
         }
         
-        // 매핑을 찾을 수 없으면, 청크 텍스트를 직접 사용하여 문장 찾기 (fallback) - cancelCurrentGeneration 호출 전에!
+        // 매핑을 찾을 수 없으면, 청크 텍스트를 직접 사용하여 문장 찾기 (fallback) - cancelGenerationOnly 호출 전에!
         if (targetSentenceIndex < 0) {
             android.util.Log.w("MainActivity", "Voice change: sentence mapping not found for absolute chunk " + currentAbsoluteChunkIndex + 
                 ", trying to find sentence by chunk text");
@@ -2846,17 +3150,17 @@ public class MainActivity extends AppCompatActivity {
         
         // 찾은 문장이 있으면 해당 문장부터 생성
         if (targetSentenceIndex >= 0 && targetSentenceIndex < sentences.size()) {
-            String targetSentence = sentences.get(targetSentenceIndex);
+            String targetSentence = String.valueOf(targetSentenceIndex);
             android.util.Log.d("MainActivity", "Voice change: found target sentence at index " + targetSentenceIndex + 
                 " for absolute chunk " + currentAbsoluteChunkIndex + ", generating from this sentence");
-            generateFromSentence(targetSentence);
+            generateAudio(targetSentence, selectedVoice, null);
             return;
         }
         
         // 모든 방법으로 찾을 수 없으면 처음부터 생성
         android.util.Log.w("MainActivity", "Voice change: could not find target sentence, generating from beginning");
-        if (!fullText.isEmpty()) {
-            generateAudio();
+        if (!sentences.isEmpty()) {
+            generateAudio("0", selectedVoice, null);
         }
     }
     
@@ -2868,21 +3172,90 @@ public class MainActivity extends AppCompatActivity {
     }
     
     /**
+     * Speed 변경 시 현재 읽던 문장부터 새롭게 청크 생성 및 재생
+     */
+    private void handleSpeedChange() {
+        // 현재 재생 중인 청크의 절대 번호 찾기
+        int currentAbsoluteChunkIndex = -1;
+        int targetSentenceIndex = -1;
+        
+        // audioChunks가 비어있지 않고, currentChunkIndex가 유효한 범위 내에 있는지 확인
+        if (audioChunks.isEmpty()) {
+            if (!sentences.isEmpty()) {
+                cancelGenerationOnly();
+                generateAudio("0", null, null);
+            }
+            return;
+        }
+        
+        // currentChunkIndex가 audioChunks 범위 내에 있는지 확인
+        if (currentChunkIndex < 0 || currentChunkIndex >= audioChunks.size()) {
+            if (!sentences.isEmpty()) {
+                cancelGenerationOnly();
+                generateAudio("0", null, null);
+            }
+            return;
+        }
+        
+        // 절대 청크 번호 계산: firstChunkAbsoluteIndex + currentChunkIndex
+        currentAbsoluteChunkIndex = firstChunkAbsoluteIndex + currentChunkIndex;
+        
+        // 현재 청크에 해당하는 문장 찾기
+        for (int i = 0; i < sentenceToChunkMap.size(); i++) {
+            if (sentenceToChunkMap.get(i) == currentAbsoluteChunkIndex) {
+                targetSentenceIndex = i;
+                break;
+            }
+        }
+        
+        // 문장을 찾지 못하면 청크 텍스트로 문장 찾기
+        if (targetSentenceIndex < 0 && currentAbsoluteChunkIndex >= 0 && currentAbsoluteChunkIndex < allChunks.size()) {
+            String currentChunkText = allChunks.get(currentAbsoluteChunkIndex);
+            for (int i = 0; i < sentences.size(); i++) {
+                if (sentences.get(i).contains(currentChunkText) || currentChunkText.contains(sentences.get(i))) {
+                    targetSentenceIndex = i;
+                    break;
+                }
+            }
+        }
+        
+        // 문장을 찾았으면 해당 문장부터 생성 및 재생
+        if (targetSentenceIndex >= 0 && targetSentenceIndex < sentences.size()) {
+            cancelGenerationOnly();
+            generateAudio(String.valueOf(targetSentenceIndex), null, null);
+        } else if (!sentences.isEmpty()) {
+            // 문장을 찾지 못하면 첫 번째 문장부터 생성
+            cancelGenerationOnly();
+            generateAudio("0", null, null);
+        }
+    }
+    
+    /**
      * 절대 청크 번호로 재생
      */
     private void playChunkByAbsoluteIndex(int absoluteChunkIndex) {
         // 현재 선택된 보이스로 파일 찾기
-        File chunkFile = findChunkFile(selectedVoice, absoluteChunkIndex);
+        File chunkFile = findChunkFile(selectedVoice, selectedSpeed, absoluteChunkIndex);
         
         if (chunkFile == null || !chunkFile.exists()) {
             // 파일이 없으면 해당 청크를 생성해야 함
             android.util.Log.d("MainActivity", "Chunk file not found for voice " + selectedVoice + ", chunk " + absoluteChunkIndex);
             // 해당 청크 텍스트 찾기
             if (absoluteChunkIndex >= 0 && absoluteChunkIndex < allChunks.size()) {
-                String chunkText = allChunks.get(absoluteChunkIndex);
-                // 해당 청크부터 생성 및 재생
-                cancelCurrentGeneration();
-                generateFromSentence(chunkText);
+                // 해당 청크가 속한 문장 찾기
+                int targetSentenceIndex = -1;
+                for (int i = 0; i < sentenceToChunkMap.size(); i++) {
+                    if (sentenceToChunkMap.get(i) == absoluteChunkIndex) {
+                        targetSentenceIndex = i;
+                        break;
+                    }
+                }
+                if (targetSentenceIndex < 0) {
+                    targetSentenceIndex = 0; // 찾을 수 없으면 0번 문장 사용
+                }
+                // 해당 문장부터 생성 및 재생
+                cancelGenerationOnly();
+                generateAudio(String.valueOf(targetSentenceIndex), selectedVoice, null);
             } else {
                 updateStatus("Chunk file not found: " + (absoluteChunkIndex + 1));
             }
@@ -2969,11 +3342,65 @@ public class MainActivity extends AppCompatActivity {
     }
     
     /**
+     * 실제 클릭인지 스크롤인지 확인
+     */
+    private boolean isActualClick() {
+        // touchDownTime이 0이면 스크롤로 판단됨
+        if (touchDownTime == 0) {
+            return false;
+        }
+        
+        long currentTime = System.currentTimeMillis();
+        long duration = currentTime - touchDownTime;
+        
+        // 시간 체크
+        if (duration > MAX_CLICK_DURATION) {
+            return false; // 너무 오래 눌렀음 (스크롤 가능성)
+        }
+        
+        // 실제 클릭으로 판단
+        return true;
+    }
+    
+    /**
      * 텍스트 클릭 핸들러 설정
      */
     private void setupTextClickHandler() {
         // TextView에 직접 터치 리스너 설정 (z-index 최상위)
         textDisplay.setOnTouchListener((v, event) -> {
+            // 스와이프 제스처 먼저 처리
+            if (gestureDetector.onTouchEvent(event)) {
+                return true;
+            }
+            
+            // 터치 다운 시 위치와 시간 저장
+            if (event.getAction() == MotionEvent.ACTION_DOWN) {
+                touchDownX = event.getX();
+                touchDownY = event.getY();
+                touchDownTime = System.currentTimeMillis();
+            }
+            
+            // 터치 업 시 거리 체크
+            if (event.getAction() == MotionEvent.ACTION_UP) {
+                float deltaX = Math.abs(event.getX() - touchDownX);
+                float deltaY = Math.abs(event.getY() - touchDownY);
+                float distance = (float) Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+                
+                // 스크롤로 판단되는 경우 (거리가 너무 멀거나 수평 이동이 큰 경우)
+                if (distance > MAX_CLICK_DISTANCE || deltaX > MAX_CLICK_DISTANCE) {
+                    touchDownTime = 0; // 클릭이 아님을 표시
+                    return false; // 스크롤로 처리
+                }
+            }
+            
+            // MOVE 이벤트는 스크롤로 간주
+            if (event.getAction() == MotionEvent.ACTION_MOVE) {
+                float deltaX = Math.abs(event.getX() - touchDownX);
+                float deltaY = Math.abs(event.getY() - touchDownY);
+                if (deltaX > MAX_CLICK_DISTANCE || deltaY > MAX_CLICK_DISTANCE) {
+                    touchDownTime = 0; // 클릭이 아님을 표시
+                }
+            }
             float x = event.getX();
             float textViewWidth = textDisplay.getWidth();
             
@@ -3014,6 +3441,10 @@ public class MainActivity extends AppCompatActivity {
         
         // Container에도 리스너 설정 (백업, TextView가 이벤트를 처리하지 않을 경우)
         textDisplayContainer.setOnTouchListener((v, event) -> {
+            // 스와이프 제스처 먼저 처리
+            if (gestureDetector.onTouchEvent(event)) {
+                return true;
+            }
             if (event.getAction() == MotionEvent.ACTION_UP) {
                 float x = event.getX();
                 float containerWidth = textDisplayContainer.getWidth();
@@ -3192,17 +3623,21 @@ public class MainActivity extends AppCompatActivity {
             return new ChunkPageInfo(-1, -1, 0.0, 0, 0);
         }
         
+        // 캐시 확인
+        if (chunkPageInfoCache.containsKey(absoluteChunkIndex)) {
+            return chunkPageInfoCache.get(absoluteChunkIndex);
+        }
+        
         // fullText에서 청크의 위치 찾기
         int chunkStartInFullText = fullText.indexOf(chunkText);
         if (chunkStartInFullText < 0) {
-            // 정확히 일치하지 않으면 부분 매칭 시도
+            // 정확히 일치하지 않으면 간단한 부분 매칭만 시도 (성능 최적화)
             String chunkTrimmed = chunkText.trim();
-            for (int i = 0; i <= fullText.length() - chunkTrimmed.length(); i++) {
-                String substring = fullText.substring(i, Math.min(i + chunkTrimmed.length(), fullText.length()));
-                if (substring.equals(chunkTrimmed)) {
-                    chunkStartInFullText = i;
-                    break;
-                }
+            if (chunkTrimmed.length() > 0) {
+                // 앞부분만 확인 (성능 최적화를 위해 루프 제거)
+                int maxCheckLength = Math.min(100, chunkTrimmed.length());
+                String chunkPart = chunkTrimmed.substring(0, maxCheckLength);
+                chunkStartInFullText = fullText.indexOf(chunkPart);
             }
         }
         
@@ -3246,7 +3681,12 @@ public class MainActivity extends AppCompatActivity {
             splitRatio = (double) chunkInStartPageLength / chunkText.length();
         }
         
-        return new ChunkPageInfo(startPage, endPage, splitRatio, chunkStartInStartPage, chunkEndInEndPage);
+        ChunkPageInfo result = new ChunkPageInfo(startPage, endPage, splitRatio, chunkStartInStartPage, chunkEndInEndPage);
+        
+        // 캐시에 저장
+        chunkPageInfoCache.put(absoluteChunkIndex, result);
+        
+        return result;
     }
     
     /**

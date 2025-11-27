@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/rootLayout"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
@@ -24,7 +25,7 @@
             android:gravity="top|start"
             android:textSize="18sp"
             android:lineSpacingMultiplier="1.12"
-            android:padding="16dp"
+            android:padding="8dp"
             android:text=""
             android:textColor="#000000"
             android:background="#FFFFFF"
@@ -66,18 +67,18 @@
         <FrameLayout
             android:id="@+id/pageIndicatorFrame"
             android:layout_width="match_parent"
-            android:layout_height="5dp"
+            android:layout_height="25dp"
             android:background="#E0E0E0"
             android:paddingStart="0dp"
             android:paddingEnd="0dp"
-            android:paddingTop="8dp"
-            android:paddingBottom="8dp">
+            android:paddingTop="0dp"
+            android:paddingBottom="0dp">
             
             <!-- 흰색 박스 (핸들러 좌우 3px) -->
             <View
                 android:id="@+id/pageIndicatorHandleBox"
                 android:layout_width="36dp"
-                android:layout_height="5dp"
+                android:layout_height="25dp"
                 android:background="#FFFFFF"
                 android:layout_gravity="start|center_vertical"
                 android:clickable="true"
@@ -87,12 +88,30 @@
             <View
                 android:id="@+id/pageIndicatorHandle"
                 android:layout_width="30dp"
-                android:layout_height="5dp"
+                android:layout_height="25dp"
                 android:background="#000000"
                 android:layout_gravity="start|center_vertical"
                 android:layout_marginStart="3dp"
                 android:clickable="true"
                 android:focusable="true" />
+            
+            <!-- 위 2.25/5 흰색 박스 (시각적 마스킹) - 핸들러 위에 그려짐 -->
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="11.25dp"
+                android:background="#FFFFFF"
+                android:layout_gravity="top"
+                android:clickable="false"
+                android:focusable="false" />
+            
+            <!-- 아래 2.25/5 흰색 박스 (시각적 마스킹) - 핸들러 위에 그려짐 -->
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="11.25dp"
+                android:background="#FFFFFF"
+                android:layout_gravity="bottom"
+                android:clickable="false"
+                android:focusable="false" />
         </FrameLayout>
     </LinearLayout>
 
@@ -146,42 +165,6 @@
         android:text="@string/generate_button"
         android:visibility="gone" />
 
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="2dp"
-        android:orientation="horizontal"
-        android:background="#FFFFFF"
-        android:padding="4dp"
-        android:gravity="center_vertical">
-
-        <TextView
-            android:id="@+id/metricsText"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="2"
-            android:text=""
-            android:textSize="11sp"
-            android:maxLines="1"
-            android:scrollbars="none"
-            android:isScrollContainer="false"
-            android:minHeight="0dp"
-            android:gravity="start" />
-
-        <TextView
-            android:id="@+id/statusText"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="@string/status_waiting"
-            android:textSize="11sp"
-            android:maxLines="1"
-            android:scrollbars="none"
-            android:isScrollContainer="false"
-            android:minHeight="0dp"
-            android:gravity="end" />
-    </LinearLayout>
-
     <Button
         android:id="@+id/copyErrorButton"
         android:layout_width="match_parent"
@@ -195,38 +178,87 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
-        android:layout_marginTop="8dp"
+        android:layout_marginTop="0dp"
         android:background="#FFFFFF"
-        android:padding="4dp"
-        android:gravity="center">
+        android:paddingStart="8dp"
+        android:paddingEnd="8dp"
+        android:paddingTop="2.67dp"
+        android:paddingBottom="5.33dp"
+        android:gravity="center_vertical">
 
         <!-- 좌측 영역: Voice 선택 -->
         <TextView
             android:id="@+id/voiceSelector"
-            android:layout_width="0dp"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="Voice: Female #1"
+            android:text="Voice  Female #1"
             android:textSize="15.6sp"
             android:textColor="#000000"
             android:clickable="true"
             android:focusable="true"
             android:background="?android:attr/selectableItemBackground"
-            android:gravity="start|center_vertical" />
+            android:gravity="start|center_vertical"
+            android:layout_gravity="center_vertical"
+            android:lineSpacingMultiplier="1.0" />
 
-        <!-- 중앙: Play 버튼 -->
+        <!-- Speed 선택 (Voice 옆에 20px 간격) -->
+        <TextView
+            android:id="@+id/speedSelector"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Speed  1x"
+            android:textSize="15.6sp"
+            android:textColor="#000000"
+            android:clickable="true"
+            android:focusable="true"
+            android:background="?android:attr/selectableItemBackground"
+            android:gravity="start|center_vertical"
+            android:layout_gravity="center_vertical"
+            android:layout_marginStart="20dp"
+            android:lineSpacingMultiplier="1.0" />
+
+        <!-- CPS/RTF 표시 (좌측 정렬) -->
+        <TextView
+            android:id="@+id/mediaMetricsText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text=""
+            android:textSize="15.6sp"
+            android:textColor="#aaaaaa"
+            android:gravity="start|center_vertical"
+            android:layout_gravity="center_vertical"
+            android:layout_marginStart="20dp"
+            android:lineSpacingMultiplier="1.0" />
+
+        <!-- Speed temp (클론, 내용 없음) -->
+        <TextView
+            android:id="@+id/speedSelectorTemp"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text=" "
+            android:textSize="15.6sp"
+            android:textColor="#000000"
+            android:clickable="false"
+            android:focusable="false"
+            android:background="?android:attr/selectableItemBackground"
+            android:gravity="start|center_vertical"
+            android:layout_gravity="center_vertical"
+            android:layout_marginStart="20dp" />
+
+        <!-- 우측: Play 버튼 -->
         <ImageButton
             android:id="@+id/playButton"
             android:layout_width="48dp"
             android:layout_height="48dp"
-            android:layout_gravity="center"
+            android:layout_gravity="center_vertical"
             android:enabled="false"
             android:background="@android:color/transparent"
             android:src="@drawable/ic_play"
             android:scaleType="fitCenter"
             android:contentDescription="Play button" />
 
-        <!-- 우측 영역: 재생 시간 -->
+        <!-- 우측 영역: 재생 시간 (숨김) -->
         <TextView
             android:id="@+id/timeDisplay"
             android:layout_width="0dp"
@@ -235,9 +267,9 @@
             android:text="00:00 / 00:00"
             android:textSize="15.6sp"
             android:textColor="#000000"
-            android:gravity="end|center_vertical"
-            android:layout_gravity="center_vertical" />
+            android:gravity="end|bottom"
+            android:layout_gravity="bottom"
+            android:visibility="gone" />
     </LinearLayout>
 
 </LinearLayout>
-
